@@ -60,7 +60,7 @@ export default function CatalogPage() {
             <li>Delivery {pl.delivery.zones.map((z) => `${z.zone} ${money(z.price_cents)}`).join(", ")} · pickup {money(pl.delivery.pickup_cents)} · quotes valid {pl.quoteValidityDays} days</li>
           </ul>
           <p className="mt-2 text-xs font-semibold uppercase tracking-wide text-ink-soft">Service area (demo seed)</p>
-          <p className="text-xs">{DEMO_SERVICE_AREAS.length} postcodes: {DEMO_SERVICE_AREAS[0]?.postcode}–{DEMO_SERVICE_AREAS[DEMO_SERVICE_AREAS.length - 1]?.postcode}</p>
+          <p className="text-xs">{DEMO_SERVICE_AREAS.length} postcodes seeded: {DEMO_SERVICE_AREAS[0]?.postcode}–{DEMO_SERVICE_AREAS[DEMO_SERVICE_AREAS.length - 1]?.postcode}. Maintain the live list under Service area.</p>
         </div>
         <div className="card text-sm">
           <h2 className="font-semibold">Rule set {RULE_SET_VERSION}</h2>

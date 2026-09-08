@@ -110,3 +110,26 @@ export function contribution(bundle: OrderBundle) {
     missingCategories: expected.filter((c) => !recorded.has(c)),
   };
 }
+
+const QUOTE_LINE_CATEGORY: Record<string, import("@/db/schema").CostCategory> = {
+  EDGE: "edge_banding",
+  CNC: "machining",
+  HW: "hardware",
+  LAB: "qc_pack_labour",
+  PKG: "packaging",
+  OVH: "overhead",
+  ENG: "presales_engineering",
+  DEL: "delivery",
+};
+
+/** Maps a quote breakdown into cost-record rows staff can later overwrite with actuals. */
+export function quoteEstimateCosts(price: import("@cfp/core").PriceBreakdown): Array<{ category: import("@/db/schema").CostCategory; amountCents: number; note: string }> {
+  const out: Array<{ category: import("@/db/schema").CostCategory; amountCents: number; note: string }> = [];
+  for (const line of price.lines) {
+    if (line.group === "tax" || line.group === "margin") continue;
+    const category = line.code.startsWith("MAT:") ? "board" : QUOTE_LINE_CATEGORY[line.code];
+    if (!category) continue;
+    out.push({ category, amountCents: line.amount_cents, note: `Quote estimate at release: ${line.label}` });
+  }
+  return out;
+}

@@ -1,14 +1,57 @@
+"use client";
+
+import { useMemo, useState } from "react";
 import type { AssemblyGuide, CompiledCabinet, HardwareBom } from "@cfp/core";
 import { Pill } from "./Badges";
 import { mm } from "@/lib/format";
 
 /**
- * Order-specific assembly guide (FR-11). Steps come from the approved recipe
- * bound to this order's panels and hardware; text is never generated freely.
+ * Order-specific assembly guide (FR-11). Searching a panel label or hardware bag
+ * jumps to the first step that uses it — the same lookup a QR code or sticker uses.
  */
-export function AssemblyGuideView({ guide, cabinet, bom, releaseKey }: { guide: AssemblyGuide; cabinet: CompiledCabinet; bom: HardwareBom; releaseKey: string | null }) {
+export function AssemblyGuideView({
+  guide,
+  cabinet,
+  bom,
+  releaseKey,
+  initialQuery = "",
+}: {
+  guide: AssemblyGuide;
+  cabinet: CompiledCabinet;
+  bom: HardwareBom;
+  releaseKey: string | null;
+  initialQuery?: string;
+}) {
   const panelById = new Map(cabinet.panels.map((p) => [p.id, p]));
   const hwName = (sku: string) => bom.lines.find((l) => l.sku === sku);
+  const [query, setQuery] = useState(initialQuery);
+
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return new Set<string>();
+    const ids = new Set<string>();
+    for (const s of guide.steps) {
+      const panels = s.panelIds.map((id) => panelById.get(id)).filter(Boolean);
+      const hay = [
+        s.id,
+        s.title,
+        s.titleZh,
+        ...s.panelIds,
+        ...panels.map((p) => `${p!.label} ${p!.name}`),
+        ...s.hardware.map((h) => {
+          const line = hwName(h.sku);
+          return `${h.sku} ${line?.bagCode ?? ""} ${line?.name ?? ""}`;
+        }),
+      ]
+        .join(" ")
+        .toLowerCase();
+      if (hay.includes(q)) ids.add(s.id);
+    }
+    return ids;
+  }, [query, guide.steps, cabinet.panels, bom.lines]);
+
+  const firstMatch = guide.steps.find((s) => matches.has(s.id));
+
   return (
     <div className="space-y-6">
       <section className="card grid gap-4 md:grid-cols-3">
@@ -25,8 +68,25 @@ export function AssemblyGuideView({ guide, cabinet, bom, releaseKey }: { guide: 
           <ul className="mt-1 list-disc pl-5 text-sm">{guide.tools.map((t) => <li key={t}>{t}</li>)}</ul>
         </div>
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-ink-soft">Record</p>
-          <p className="mt-1 text-sm">Recipe {guide.recipeId} v{guide.recipeVersion}</p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-ink-soft">Find a part</p>
+          <input
+            className="input mt-1 no-print"
+            placeholder="A07, H02, left side…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            aria-label="Look up a panel label or hardware bag"
+          />
+          {query.trim() && (
+            <p className="mt-1 text-xs text-ink-soft">
+              {matches.size === 0 ? "No step uses that part." : `${matches.size} step(s).`}{" "}
+              {firstMatch && (
+                <a className="underline" href={`#${firstMatch.id}`}>
+                  Jump to step {firstMatch.order}
+                </a>
+              )}
+            </p>
+          )}
+          <p className="mt-2 text-sm">Recipe {guide.recipeId} v{guide.recipeVersion}</p>
           <p className="text-sm">{releaseKey ? `Release ${releaseKey}` : "Preview — not yet released"}</p>
           {cabinet.antiTipRequired && <Pill tone="warn">Wall restraint step included</Pill>}
         </div>
@@ -35,7 +95,7 @@ export function AssemblyGuideView({ guide, cabinet, bom, releaseKey }: { guide: 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         <ol className="space-y-4">
           {guide.steps.map((s) => (
-            <li key={s.id} id={s.id} className={`card ${s.isSafetyCritical ? "border-amber-300" : ""}`}>
+            <li key={s.id} id={s.id} className={`card ${s.isSafetyCritical ? "border-amber-300" : ""} ${matches.has(s.id) ? "ring-2 ring-brand" : ""}`}>
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <h3 className="font-semibold"><span className="mr-2 rounded bg-stone-900 px-2 py-0.5 text-xs text-white">Step {s.order}</span>{s.title}</h3>
                 <span className="text-xs text-ink-soft">{s.titleZh} · {s.id}</span>
@@ -62,7 +122,7 @@ export function AssemblyGuideView({ guide, cabinet, bom, releaseKey }: { guide: 
                       <ul className="mt-1 space-y-0.5">
                         {s.panelIds.map((id) => {
                           const p = panelById.get(id);
-                          return p ? <li key={id}><span className="font-mono font-semibold">{p.label}</span> {p.name} · {mm(p.finished.length_um)} × {mm(p.finished.width_um)}</li> : <li key={id}>{id}</li>;
+                          return p ? <li key={id}><button type="button" className="font-mono font-semibold underline" onClick={() => setQuery(p.label)}>{p.label}</button> {p.name} · {mm(p.finished.length_um)} × {mm(p.finished.width_um)}</li> : <li key={id}>{id}</li>;
                         })}
                       </ul>
                     </div>
@@ -73,7 +133,7 @@ export function AssemblyGuideView({ guide, cabinet, bom, releaseKey }: { guide: 
                       <ul className="mt-1 space-y-0.5">
                         {s.hardware.map((h) => {
                           const line = hwName(h.sku);
-                          return <li key={h.sku}><span className="font-mono font-semibold">{line?.bagCode ?? "?"}</span> {line?.name ?? h.sku} × {h.qty}</li>;
+                          return <li key={h.sku}><button type="button" className="font-mono font-semibold underline" onClick={() => setQuery(line?.bagCode ?? h.sku)}>{line?.bagCode ?? "?"}</button> {line?.name ?? h.sku} × {h.qty}</li>;
                         })}
                       </ul>
                     </div>
@@ -93,7 +153,7 @@ export function AssemblyGuideView({ guide, cabinet, bom, releaseKey }: { guide: 
               <tbody>
                 {cabinet.panels.map((p) => (
                   <tr key={p.id} className="border-b border-stone-100">
-                    <td className="py-1 font-mono font-semibold">{p.label}</td>
+                    <td className="py-1"><button type="button" className="font-mono font-semibold underline" onClick={() => setQuery(p.label)}>{p.label}</button></td>
                     <td className="py-1">{p.name}</td>
                     <td className="py-1 text-right tabular-nums">{mm(p.finished.length_um)} × {mm(p.finished.width_um)}</td>
                   </tr>
@@ -106,7 +166,10 @@ export function AssemblyGuideView({ guide, cabinet, bom, releaseKey }: { guide: 
             <ul className="mt-2 space-y-1">
               {bom.bags.map((bag) => (
                 <li key={bag.bagCode}>
-                  <span className="font-mono font-semibold">{bag.bagCode}</span>: {bag.skus.map((sku) => { const l = hwName(sku); return `${l?.name ?? sku} × ${l?.qty ?? "?"}`; }).join("; ")}
+                  <button type="button" className="font-mono font-semibold underline" onClick={() => setQuery(bag.bagCode)}>
+                    {bag.bagCode}
+                  </button>
+                  : {bag.skus.map((sku) => { const l = hwName(sku); return `${l?.name ?? sku} × ${l?.qty ?? "?"}`; }).join("; ")}
                 </li>
               ))}
             </ul>

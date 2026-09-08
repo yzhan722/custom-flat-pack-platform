@@ -195,16 +195,19 @@ export async function confirmOrder(_prev: ActionState, formData: FormData): Prom
  * Pilot payments are recorded manually (no gateway). The idempotency key makes a
  * double click or a retried request record the payment once (FR-07 acceptance).
  */
-export async function recordCustomerPayment(orderId: string, kind: "deposit" | "balance"): Promise<ActionState> {
+export async function recordCustomerPayment(orderId: string, kind: "intent_deposit" | "deposit" | "balance"): Promise<ActionState> {
   const order = await getOrderForViewer(orderId);
   if (!order) return { ok: false, error: "Order not found." };
   const quote = await activeOrAcceptedQuote(orderId);
-  if (!quote || quote.status !== "accepted" || order.status === "draft" || order.status === "submitted" || order.status === "quoted") {
-    return { ok: false, error: "Payments are taken after you confirm the quote." };
+  if (!quote) return { ok: false, error: "There is no quote to pay against." };
+  if (kind === "intent_deposit") {
+    if (quote.status !== "active" || order.status !== "quoted") return { ok: false, error: "Intent deposits are only taken on an active quote before confirmation." };
+  } else if (quote.status !== "accepted" || order.status === "draft" || order.status === "submitted" || order.status === "quoted") {
+    return { ok: false, error: "The 50% deposit and balance are taken after you confirm the quote." };
   }
   const existing = await getDb().then((db) => db.select().from(payments).where(eq(payments.orderId, orderId)));
   const paid = existing.filter((p) => p.kind === "deposit" || p.kind === "balance").reduce((a, p) => a + p.amountCents, 0);
-  const amount = kind === "deposit" ? quote.depositCents : Math.max(0, quote.totalCents - paid);
+  const amount = kind === "intent_deposit" ? Math.round(quote.totalCents * 0.1) : kind === "deposit" ? quote.depositCents : Math.max(0, quote.totalCents - paid);
   if (amount <= 0) return { ok: false, error: "Nothing left to pay." };
   const db = await getDb();
   await db
@@ -217,14 +220,14 @@ export async function recordCustomerPayment(orderId: string, kind: "deposit" | "
       amountCents: amount,
       method: "simulated_pilot",
       reference: null,
-      note: "Recorded from the customer order page (pilot — no live gateway).",
+      note: kind === "intent_deposit" ? "Refundable intent deposit (pilot). Does not start production." : "Recorded from the customer order page (pilot — no live gateway).",
       recordedBy: "customer",
       createdAt: nowIso(),
     })
     .onConflictDoNothing();
   await recomputePaymentStatus(orderId);
   revalidatePath(`/orders/${orderId}`);
-  return { ok: true, message: `${kind === "deposit" ? "Deposit" : "Balance"} recorded.` };
+  return { ok: true, message: kind === "intent_deposit" ? "Intent deposit recorded." : `${kind === "deposit" ? "Deposit" : "Balance"} recorded.` };
 }
 
 const CaseSchema = z.object({

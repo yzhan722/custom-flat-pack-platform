@@ -13,9 +13,9 @@ import {
   submitForReview,
   type ActionState,
 } from "@/server/actions/customer";
-import { addCost, inspectPanel, issueQuote, packPackage, recordPayment, recordReview, runProductionStep, seedDemoOrders, updateServiceCase } from "@/server/actions/admin";
-import { contribution, releaseGateFor, shipmentBlockers } from "@/server/production";
-import { getOrder, listAllOrders, listPayments, listReleases, loadOrderBundle } from "@/server/queries";
+import { addCost, copyQuoteEstimateCosts, deleteServiceArea, inspectPanel, issueQuote, packPackage, recordPayment, recordReview, runProductionStep, seedDemoOrders, updateServiceCase, upsertServiceArea } from "@/server/actions/admin";
+import { contribution, quoteEstimateCosts, releaseGateFor, shipmentBlockers } from "@/server/production";
+import { getOrder, getRelease, listAllOrders, listPayments, listReleases, listServiceAreas, loadOrderBundle } from "@/server/queries";
 
 const INIT: ActionState = { ok: false };
 
@@ -133,10 +133,17 @@ describe("order lifecycle (PRD §4, §7)", () => {
     expect(Math.round(days)).toBe(7);
   });
 
-  it("payments before confirmation are refused; release gate lists every missing condition", async () => {
+  it("payments before confirmation are refused except a refundable intent deposit", async () => {
     const pay = await recordCustomerPayment(orderId, "deposit");
     expect(pay.ok).toBe(false);
-    const gate = releaseGateFor(await bundle(orderId));
+    const intent = await recordCustomerPayment(orderId, "intent_deposit");
+    expect(intent).toMatchObject({ ok: true });
+    expect((await recordCustomerPayment(orderId, "intent_deposit")).ok).toBe(true);
+    const b = await bundle(orderId);
+    expect(b.payments.filter((p) => p.kind === "intent_deposit")).toHaveLength(1);
+    expect(b.totals.intent_cents).toBe(Math.round(b.quote!.totalCents * 0.1));
+    expect(b.order.paymentStatus).toBe("unpaid");
+    const gate = releaseGateFor(b);
     expect(gate.ok).toBe(false);
     expect(gate.reasons.join(" ")).toMatch(/must be confirmed/);
   });
@@ -176,7 +183,9 @@ describe("order lifecycle (PRD §4, §7)", () => {
     const dup = await recordPayment(INIT, form({ orderId, kind: "balance", amount: String(balance), method: "bank_transfer", idempotencyKey: "NAB-1" }));
     expect(dup.message).toMatch(/Duplicate/);
     payments = await listPayments(orderId);
-    expect(payments).toHaveLength(2);
+    expect(payments.filter((p) => p.kind === "deposit")).toHaveLength(1);
+    expect(payments.filter((p) => p.kind === "balance")).toHaveLength(1);
+    expect(payments.filter((p) => p.kind === "intent_deposit")).toHaveLength(1);
     b = await bundle(orderId);
     expect(b.order.paymentStatus).toBe("settled");
   });
@@ -333,5 +342,44 @@ describe("change control (PRD §7.2)", () => {
     const r = await recordReview(INIT, form({ orderId: id, decision: "approved", notes: "trying to force it" }));
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/UNSUPPORTED/);
+  });
+
+  it("service area postcodes can be added and removed by staff", async () => {
+    await signInAdmin("test-admin");
+    expect(await upsertServiceArea(INIT, form({ postcode: "3999", zone: "A", label: "Trial suburb" }))).toMatchObject({ ok: true });
+    expect((await listServiceAreas()).some((r) => r.postcode === "3999")).toBe(true);
+    expect(await deleteServiceArea(INIT, form({ postcode: "3999" }))).toMatchObject({ ok: true });
+    expect((await listServiceAreas()).some((r) => r.postcode === "3999")).toBe(false);
+  });
+
+  it("quote estimate lines can be copied into the cost ledger once", async () => {
+    jar.clear();
+    const url = await expectRedirect(startOrder(INIT, form({ purpose: "general_storage", templateId: "TPL-LOW-O", postcode: "3000", deliveryMethod: "local_delivery", width_mm: "900" })));
+    const id = url.split("/")[2]!;
+    await saveMeasurement(id, { spaceConstrained: false, internalRequirements: [], obstacles: [], evidence: [] });
+    expect((await submitForReview(id, { name: "Sam Lee", email: "sam@example.com", phone: "0400 111 222" })).ok).toBe(true);
+    await signInAdmin("test-admin");
+    expect(await recordReview(INIT, form({ orderId: id, decision: "approved", notes: "Checked and approved." }))).toMatchObject({ ok: true });
+    expect(await issueQuote(INIT, form({ orderId: id, leadTimeDays: "14", validityDays: "7" }))).toMatchObject({ ok: true });
+    const first = await copyQuoteEstimateCosts(INIT, form({ orderId: id }));
+    expect(first).toMatchObject({ ok: true });
+    const b = await bundle(id);
+    expect(b.costs.length).toBe(quoteEstimateCosts(b.quote!.price).length);
+    expect(b.costs.every((c) => c.note?.startsWith("Quote estimate at release"))).toBe(true);
+    const second = await copyQuoteEstimateCosts(INIT, form({ orderId: id }));
+    expect(second.message).toMatch(/already/);
+    expect((await bundle(id)).costs.length).toBe(b.costs.length);
+  });
+
+  it("a release can be loaded by key for the public assembly guide without customer PII in the payload summary", async () => {
+    jar.clear();
+    await signInAdmin("test-admin");
+    const demo = (await listAllOrders()).filter((o) => o.status === "qc_packing" && o.customerId === "cus_demo");
+    expect(demo.length).toBeGreaterThan(0);
+    const b = await loadOrderBundle(demo[0]!);
+    const rel = await getRelease(b.release!.releaseKey);
+    expect(rel).not.toBeNull();
+    expect(JSON.stringify(rel!.payload.summary)).not.toMatch(/@example\.com/);
+    expect(rel!.payload.design.installation.deliveryPostcode).toBeTruthy();
   });
 });

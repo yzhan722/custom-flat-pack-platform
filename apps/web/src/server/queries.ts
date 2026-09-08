@@ -11,6 +11,7 @@ import {
   quotes,
   releases,
   reviews,
+  serviceAreas,
   serviceCases,
   type Confirmation,
   type CostRecord,
@@ -206,3 +207,8 @@ export async function loadOrderBundle(order: Order) {
 }
 
 export type OrderBundle = Awaited<ReturnType<typeof loadOrderBundle>>;
+
+export async function listServiceAreas() {
+  const db = await getDb();
+  return db.select().from(serviceAreas).orderBy(serviceAreas.postcode);
+}

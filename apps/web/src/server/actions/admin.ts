@@ -6,13 +6,13 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { addDays, buildProductionRelease, newId, type DesignSpec, type MeasurementSet } from "@cfp/core";
 import { getDb } from "@/db/client";
-import { costRecords, payments, quotes, releases, reviews, serviceCases, type CostCategory, type Order } from "@/db/schema";
+import { costRecords, payments, quotes, releases, reviews, serviceAreas, serviceCases, type CostCategory, type Order } from "@/db/schema";
 import { requireAdmin, signInAdmin, signOutAdmin } from "@/lib/auth";
 import { catalog, DEFAULT_LEAD_TIME_DAYS, DEPOSIT_RATE, FACTORY_ADAPTER, pilotPriceList } from "@/lib/catalog";
 import { evaluateDesign } from "@/lib/engineering";
 import { nowIso } from "@/lib/format";
 import { appendDesignVersion, confirmCurrentVersion, createDraftOrder, logEvent, recomputePaymentStatus, requiredAcknowledgements, transition, updateOrder } from "../orders";
-import { releaseGateFor, shipmentBlockers } from "../production";
+import { releaseGateFor, shipmentBlockers, quoteEstimateCosts } from "../production";
 import { currentDesignVersion, getOrder, loadOrderBundle } from "../queries";
 import type { ActionState } from "./customer";
 
@@ -430,6 +430,63 @@ export async function addCost(_prev: ActionState, formData: FormData): Promise<A
   });
   refresh(i.orderId);
   return { ok: true, message: "Cost recorded." };
+}
+
+export async function copyQuoteEstimateCosts(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const orderId = String(formData.get("orderId") ?? "");
+  const { actor, order } = await staffOrder(orderId);
+  const bundle = await loadOrderBundle(order);
+  if (!bundle.quote) return fail("No quote to copy from.");
+  const db = await getDb();
+  const existing = await db.select({ note: costRecords.note }).from(costRecords).where(eq(costRecords.orderId, orderId));
+  if (existing.some((c) => c.note?.startsWith("Quote estimate at release"))) {
+    return { ok: true, message: "Quote estimate lines are already on this order." };
+  }
+  const snapshot = quoteEstimateCosts(bundle.quote.price);
+  if (!snapshot.length) return fail("Quote has no manufacturing or fulfilment lines to copy.");
+  await db.insert(costRecords).values(
+    snapshot.map((c) => ({
+      id: newId("cost"),
+      orderId,
+      category: c.category,
+      amountCents: c.amountCents,
+      minutes: null,
+      note: c.note,
+      recordedBy: actor,
+      createdAt: nowIso(),
+    })),
+  );
+  refresh(orderId);
+  return { ok: true, message: `Copied ${snapshot.length} estimate lines. Replace them with actuals as they come in.` };
+}
+
+const AreaSchema = z.object({
+  postcode: z.string().trim().regex(/^\d{4}$/, "Australian postcodes have 4 digits"),
+  zone: z.enum(["A", "B"]),
+  label: z.string().trim().min(2).max(80),
+});
+
+export async function upsertServiceArea(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAdmin();
+  const parsed = AreaSchema.safeParse(Object.fromEntries(formData.entries()));
+  if (!parsed.success) return fail("Postcode must be 4 digits and the zone must be A or B.");
+  const db = await getDb();
+  await db
+    .insert(serviceAreas)
+    .values(parsed.data)
+    .onConflictDoUpdate({ target: serviceAreas.postcode, set: { zone: parsed.data.zone, label: parsed.data.label } });
+  revalidatePath("/admin/service-areas");
+  return { ok: true, message: `Postcode ${parsed.data.postcode} is in ${parsed.data.label}.` };
+}
+
+export async function deleteServiceArea(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  await requireAdmin();
+  const postcode = String(formData.get("postcode") ?? "").trim();
+  if (!/^\d{4}$/.test(postcode)) return fail("Invalid postcode.");
+  const db = await getDb();
+  await db.delete(serviceAreas).where(eq(serviceAreas.postcode, postcode));
+  revalidatePath("/admin/service-areas");
+  return { ok: true, message: `Removed ${postcode}.` };
 }
 
 // ---------------------------------------------------------------------------

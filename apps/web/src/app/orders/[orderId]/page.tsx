@@ -4,6 +4,7 @@ import { ORDER_STATUS_LABELS, quoteValidity, type OrderStatus } from "@cfp/core"
 import { ActionForm } from "@/components/ActionForm";
 import { EngineeringBadge, OrderStatusBadge, PaymentBadge, Pill } from "@/components/Badges";
 import { ClaimAccess } from "@/components/ClaimAccess";
+import { CopyButton } from "@/components/CopyButton";
 import { ElevationDrawing } from "@/components/ElevationDrawing";
 import { Page } from "@/components/SiteChrome";
 import { dateOnly, dateTime, money } from "@/lib/format";
@@ -118,12 +119,25 @@ export default async function OrderPage({ params, searchParams }: { params: Prom
             )}
           </section>
 
-          {quote?.status === "accepted" && (
+          {(quote?.status === "accepted" || quote?.status === "active") && (
             <section className="card">
               <h2 className="font-semibold">Payments</h2>
-              <p className="mt-1 text-sm text-ink-soft">Paid {money(b.totals.paid_cents - b.totals.refunded_cents)} of {money(quote.totalCents)}. Production is released only once the balance is settled.</p>
+              <p className="mt-1 text-sm text-ink-soft">
+                {quote.status === "active"
+                  ? `A refundable intent deposit of ${money(Math.round(quote.totalCents * 0.1))} can be paid before you confirm. It does not start production.`
+                  : `Paid ${money(b.totals.paid_cents - b.totals.refunded_cents)} of ${money(quote.totalCents)}. Production is released only once the balance is settled.`}
+              </p>
               <div className="mt-3">
-                <PayButtons orderId={order.id} depositCents={quote.depositCents} outstandingCents={outstanding} depositPaid={b.totals.paid_cents >= quote.depositCents} />
+                <PayButtons
+                  orderId={order.id}
+                  status={order.status}
+                  quoteStatus={quote.status}
+                  depositCents={quote.depositCents}
+                  intentCents={Math.round(quote.totalCents * 0.1)}
+                  outstandingCents={outstanding}
+                  depositPaid={b.totals.paid_cents >= quote.depositCents}
+                  intentPaid={b.totals.intent_cents > 0}
+                />
               </div>
               {b.payments.length > 0 && (
                 <ul className="mt-3 divide-y divide-stone-100 text-sm">
@@ -198,6 +212,9 @@ export default async function OrderPage({ params, searchParams }: { params: Prom
             <h3 className="font-semibold">Share this order</h3>
             <p className="mt-1 text-xs text-ink-soft">This link opens the order on any device. Keep it private.</p>
             <code className="mt-2 block break-all rounded bg-stone-100 p-2 text-[11px]">/orders/{order.id}?t={order.accessToken}</code>
+            <div className="mt-2">
+              <CopyButton text={`/orders/${order.id}?t=${order.accessToken}`} label="Copy path" />
+            </div>
           </section>
         </aside>
       </div>

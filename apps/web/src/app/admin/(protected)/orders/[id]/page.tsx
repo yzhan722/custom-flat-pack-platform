@@ -7,7 +7,7 @@ import { ElevationDrawing } from "@/components/ElevationDrawing";
 import { PriceBreakdown } from "@/components/PriceBreakdown";
 import { RuleReport } from "@/components/RuleReport";
 import { dateOnly, dateTime, mm, money, titleCase } from "@/lib/format";
-import { addCost, inspectPanel, issueQuote, packPackage, recordPayment, recordReview, runProductionStep, updateServiceCase } from "@/server/actions/admin";
+import { addCost, copyQuoteEstimateCosts, inspectPanel, issueQuote, packPackage, recordPayment, recordReview, runProductionStep, updateServiceCase } from "@/server/actions/admin";
 import { contribution, inspectionState, openBlocks, releaseGateFor, shipmentBlockers } from "@/server/production";
 import { getOrder, loadOrderBundle } from "@/server/queries";
 
@@ -200,8 +200,10 @@ export default async function AdminOrderPage({ params }: { params: Promise<{ id:
                     <div className="mt-2 flex flex-wrap gap-2 text-xs">
                       <a className="btn-secondary btn-sm" href={`/admin/orders/${order.id}/release/${r.releaseKey}/cutlist.csv`}>Cut list CSV</a>
                       <a className="btn-secondary btn-sm" href={`/admin/orders/${order.id}/release/${r.releaseKey}/operations.csv`}>Operations CSV</a>
+                      <a className="btn-secondary btn-sm" href={`/admin/orders/${order.id}/release/${r.releaseKey}/package`}>Release JSON</a>
                       <Link className="btn-secondary btn-sm" href={`/admin/orders/${order.id}/release/${r.releaseKey}/labels`}>Labels</Link>
                       <Link className="btn-secondary btn-sm" href={`/admin/orders/${order.id}/release/${r.releaseKey}/packing`}>Packing list</Link>
+                      <Link className="btn-secondary btn-sm" href={`/guide/${r.releaseKey}`}>Public guide (QR)</Link>
                       <Link className="btn-secondary btn-sm" href={`/orders/${order.id}/assembly?t=${order.accessToken}`}>Assembly guide</Link>
                       {r.status === "active" && <StepForm orderId={order.id} intent="stop_release" label="Stop release" cls="btn-danger btn-sm" withText placeholder="Reason" confirm="Stop this release? Production must halt." />}
                     </div>
@@ -342,6 +344,12 @@ export default async function AdminOrderPage({ params }: { params: Promise<{ id:
                 </div>
                 <input name="note" className="input mt-2" placeholder="Note" />
               </ActionForm>
+              {b.quote && (
+                <ActionForm action={copyQuoteEstimateCosts} submitLabel="Copy quote estimates into costs" submitClassName="btn-secondary btn-sm" className="mt-2">
+                  <input type="hidden" name="orderId" value={order.id} />
+                  <p className="text-xs text-ink-soft">Fills manufacturing and delivery lines from the formal quote so you can overwrite them with actuals. Does not include platform margin or GST.</p>
+                </ActionForm>
+              )}
               <div className="text-sm">
                 <table className="table text-xs">
                   <tbody>
