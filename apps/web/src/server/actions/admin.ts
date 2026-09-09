@@ -1,13 +1,14 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { addDays, buildProductionRelease, buildReplacementRelease, newId, type DesignSpec, type MeasurementSet } from "@cfp/core";
 import { getDb } from "@/db/client";
-import { costRecords, payments, quotes, releases, reviews, serviceAreas, serviceCases, type CostCategory, type Order } from "@/db/schema";
-import { requireAdmin, signInAdmin, signOutAdmin } from "@/lib/auth";
+import { confirmations, costRecords, designVersions, enquiries, media, orders, payments, productionEvents, quotes, releases, reviews, serviceAreas, serviceCases, type CostCategory, type Order } from "@/db/schema";
+import { requireAdmin, setCustomerId, signInAdmin, signOutAdmin } from "@/lib/auth";
+import { DEMO_CUSTOMER_ID, DEMO_ENQUIRY_NOTE, demoToolsEnabled } from "@/lib/demo";
 import { catalog, DEFAULT_LEAD_TIME_DAYS, DEPOSIT_RATE, FACTORY_ADAPTER, pilotPriceList } from "@/lib/catalog";
 import { evaluateDesign } from "@/lib/engineering";
 import { nowIso } from "@/lib/format";
@@ -567,63 +568,267 @@ export async function deleteServiceArea(_prev: ActionState, formData: FormData):
 // ---------------------------------------------------------------------------
 
 export async function seedDemoOrders(_prev: ActionState, _formData: FormData): Promise<ActionState> {
-  if (process.env.NODE_ENV === "production" && process.env.ALLOW_DEMO_SEED !== "true") return fail("Demo seeding is disabled in production.");
+  if (!demoToolsEnabled()) return fail("Demo seeding is disabled in production.");
   const actor = await requireAdmin();
-  const customerId = "cus_demo";
-  const contact = { customerName: "Demo Customer", customerEmail: "demo@example.com", customerPhone: "0400 000 000" };
-  const freeStanding: MeasurementSet = { spaceConstrained: false, internalRequirements: [], obstacles: [], evidence: [], confirmedBy: "Demo Customer" };
-
-  // 1. Draft, open shelves.
-  await createDraftOrder({ customerId, templateId: "TPL-LOW-O", purpose: "books_and_files", postcode: "3000", deliveryMethod: "local_delivery", width_mm: 900, budgetCents: 90_000, timeframe: "1-3 months", needsInstallation: false });
-
-  // 2. Submitted, waiting for review: doors, 750 high, alcove measured.
-  const submittedId = await createDraftOrder({ customerId, templateId: "TPL-LOW-D", purpose: "living_room_storage", postcode: "3100", deliveryMethod: "local_delivery", width_mm: 1500, budgetCents: 180_000, timeframe: "As soon as possible", needsInstallation: true });
-  let order = (await getOrder(submittedId))!;
-  let current = await currentDesignVersion(order);
-  const taller: DesignSpec = { ...current.design, finished: { ...current.design.finished, height_mm: 750, depth_mm: 450 }, installation: { ...current.design.installation, wallType: "plasterboard_on_stud", antiTipAcknowledged: true } };
-  await appendDesignVersion(order, taller, { ...freeStanding, spaceConstrained: true, availableSpace: { widths: [{ value_mm: 1540, source: "manual_remeasured", location: "floor" }, { value_mm: 1548, source: "manual_remeasured", location: "600 mm" }, { value_mm: 1544, source: "manual_remeasured", location: "top" }] }, obstacles: [{ kind: "skirting", description: "MDF skirting", protrusion_mm: 12 }] }, "customer", "Taller, deeper, alcove measured");
-  order = (await getOrder(submittedId))!;
-  await transition(order, "submitted", contact);
-
-  // 3. Quoted: approved and formally quoted.
-  const quotedId = await createDraftOrder({ customerId, templateId: "TPL-LOW-D", purpose: "general_storage", postcode: "3000", deliveryMethod: "local_delivery", width_mm: 1200, budgetCents: 150_000, timeframe: "1-3 months", needsInstallation: false });
-  await walkToQuoted(quotedId, contact, freeStanding, actor);
-
-  // 4. In production: confirmed, paid, released, production started.
-  const productionId = await createDraftOrder({ customerId, templateId: "TPL-LOW-O", purpose: "general_storage", postcode: "3000", deliveryMethod: "pickup", width_mm: 1800, budgetCents: 160_000, timeframe: "1-3 months", needsInstallation: false });
-  const quotedOrder = await walkToQuoted(productionId, contact, freeStanding, actor);
-  current = await currentDesignVersion(quotedOrder);
-  const acks = Object.fromEntries(requiredAcknowledgements(current.engineering.cabinet?.antiTipRequired ?? false).map((k) => [k, true]));
-  const confirmed = await confirmCurrentVersion(quotedOrder, "Demo Customer", acks);
-  if (!confirmed.ok) return fail(`Demo seed failed at confirmation: ${confirmed.error}`);
-  let bundle = await loadOrderBundle((await getOrder(productionId))!);
-  const db = await getDb();
-  await db.insert(payments).values({ id: newId("pay"), orderId: productionId, idempotencyKey: `${productionId}:demo:full`, kind: "balance", amountCents: bundle.quote!.totalCents, method: "bank_transfer", reference: "DEMO-001", note: "Demo settlement", recordedBy: actor, createdAt: nowIso() }).onConflictDoNothing();
-  await recomputePaymentStatus(productionId);
-  await logEvent(productionId, null, "materials_confirmed", { designVersion: bundle.order.currentDesignVersion, note: "demo batch" }, actor);
-  await logEvent(productionId, null, "capacity_confirmed", { designVersion: bundle.order.currentDesignVersion, note: "demo slot" }, actor);
-  const rel = await runProductionStep({ ok: false }, stepForm(productionId, "release"));
-  if (!rel.ok) return fail(`Demo seed failed at release: ${rel.error} ${rel.reasons?.join("; ") ?? ""}`);
-  await runProductionStep({ ok: false }, stepForm(productionId, "start_production"));
-  await runProductionStep({ ok: false }, stepForm(productionId, "start_qc"));
-  bundle = await loadOrderBundle((await getOrder(productionId))!);
-  for (const p of bundle.release!.payload.panels.slice(0, 6)) {
-    await logEvent(productionId, bundle.release!.releaseKey, "panel_inspected", { panelId: p.id, pass: true, notes: "demo" }, actor);
+  try {
+    await wipeDemoRecords();
+    return await buildDemoPipeline(actor);
+  } catch (err) {
+    return fail(`Demo seed failed: ${(err as Error).message}`);
   }
-  await db.insert(costRecords).values([
-    { id: newId("cost"), orderId: productionId, category: "board", amountCents: 21_000, minutes: null, note: "2 sheets", recordedBy: actor, createdAt: nowIso() },
-    { id: newId("cost"), orderId: productionId, category: "hardware", amountCents: 9_500, minutes: null, note: null, recordedBy: actor, createdAt: nowIso() },
-    { id: newId("cost"), orderId: productionId, category: "presales_engineering", amountCents: 6_000, minutes: 40, note: "review + quote", recordedBy: actor, createdAt: nowIso() },
-  ]);
-  revalidatePath("/admin");
-  revalidatePath("/admin/orders");
-  return { ok: true, message: "Created 4 demo orders: draft, submitted, quoted and in production (QC started)." };
 }
 
-function stepForm(orderId: string, intent: string): FormData {
+export async function adoptDemoIdentity(_prev: ActionState, _formData: FormData): Promise<ActionState> {
+  if (!demoToolsEnabled()) return fail("Demo identity is disabled in production.");
+  await requireAdmin();
+  await setCustomerId(DEMO_CUSTOMER_ID);
+  redirect("/orders");
+}
+
+async function buildDemoPipeline(actor: string): Promise<ActionState> {
+  const db = await getDb();
+
+  const freeStanding: MeasurementSet = { spaceConstrained: false, internalRequirements: [], obstacles: [], evidence: [], confirmedBy: "Demo Customer" };
+  const alcove: MeasurementSet = {
+    spaceConstrained: true,
+    availableSpace: {
+      widths: [
+        { value_mm: 1540, source: "manual_remeasured", location: "floor" },
+        { value_mm: 1548, source: "manual_remeasured", location: "600 mm" },
+        { value_mm: 1544, source: "manual_remeasured", location: "top" },
+      ],
+    },
+    obstacles: [{ kind: "skirting", description: "MDF skirting", protrusion_mm: 12 }],
+    internalRequirements: [],
+    evidence: [],
+    confirmedBy: "Priya Nair",
+  };
+
+  // 1. Draft — open shelves, still in the configurator.
+  await createDraftOrder({
+    customerId: DEMO_CUSTOMER_ID,
+    templateId: "TPL-LOW-O",
+    purpose: "books_and_files",
+    postcode: "3000",
+    deliveryMethod: "local_delivery",
+    width_mm: 900,
+    budgetCents: 90_000,
+    timeframe: "1-3 months",
+    needsInstallation: false,
+    customerName: "Jordan Blake",
+    customerEmail: "jordan.blake@example.com",
+    customerPhone: "0400 111 001",
+    referralSource: "demo:draft",
+  });
+
+  // 2. Submitted — doors, 750 mm, alcove measured, waiting for engineering.
+  const submittedId = await createDraftOrder({
+    customerId: DEMO_CUSTOMER_ID,
+    templateId: "TPL-LOW-D",
+    purpose: "living_room_storage",
+    postcode: "3100",
+    deliveryMethod: "local_delivery",
+    width_mm: 1500,
+    budgetCents: 180_000,
+    timeframe: "As soon as possible",
+    needsInstallation: true,
+    customerName: "Priya Nair",
+    customerEmail: "priya.nair@example.com",
+    customerPhone: "0400 111 002",
+    referralSource: "demo:submitted",
+  });
+  let order = (await getOrder(submittedId))!;
+  const current = await currentDesignVersion(order);
+  const taller: DesignSpec = {
+    ...current.design,
+    finished: { ...current.design.finished, height_mm: 750, depth_mm: 450 },
+    installation: { ...current.design.installation, wallType: "plasterboard_on_stud", antiTipAcknowledged: true },
+  };
+  await appendDesignVersion(order, taller, alcove, "customer", "Taller, deeper, alcove measured");
+  order = (await getOrder(submittedId))!;
+  await transition(order, "submitted", { customerName: "Priya Nair", customerEmail: "priya.nair@example.com", customerPhone: "0400 111 002" });
+
+  // 3. Quoted — ready for the customer to confirm and pay an intent deposit.
+  const quotedId = await createDraftOrder({
+    customerId: DEMO_CUSTOMER_ID,
+    templateId: "TPL-LOW-D",
+    purpose: "general_storage",
+    postcode: "3000",
+    deliveryMethod: "local_delivery",
+    width_mm: 1200,
+    budgetCents: 150_000,
+    timeframe: "1-3 months",
+    needsInstallation: false,
+    customerName: "Sam Okonkwo",
+    customerEmail: "sam.okonkwo@example.com",
+    customerPhone: "0400 111 003",
+    referralSource: "demo:quoted",
+  });
+  await walkToQuoted(quotedId, { customerName: "Sam Okonkwo", customerEmail: "sam.okonkwo@example.com", customerPhone: "0400 111 003" }, freeStanding, actor);
+
+  // 4. Confirmed and paid — release gate is open, not yet issued.
+  const confirmedId = await createDraftOrder({
+    customerId: DEMO_CUSTOMER_ID,
+    templateId: "TPL-LOW-D",
+    purpose: "general_storage",
+    postcode: "3000",
+    deliveryMethod: "local_delivery",
+    width_mm: 1000,
+    budgetCents: 140_000,
+    timeframe: "1-3 months",
+    needsInstallation: false,
+    customerName: "Alex Chen",
+    customerEmail: "alex.chen@example.com",
+    customerPhone: "0400 111 004",
+    referralSource: "demo:confirmed",
+  });
+  await walkToPaid(confirmedId, { customerName: "Alex Chen", customerEmail: "alex.chen@example.com", customerPhone: "0400 111 004" }, freeStanding, actor, "DEMO-CONF");
+
+  // 5. Shop floor — QC started, some panels still pending so dispatch is blocked.
+  const qcId = await createDraftOrder({
+    customerId: DEMO_CUSTOMER_ID,
+    templateId: "TPL-LOW-O",
+    purpose: "general_storage",
+    postcode: "3000",
+    deliveryMethod: "pickup",
+    width_mm: 1800,
+    budgetCents: 160_000,
+    timeframe: "1-3 months",
+    needsInstallation: false,
+    customerName: "Mei Tan",
+    customerEmail: "mei.tan@example.com",
+    customerPhone: "0400 111 005",
+    referralSource: "demo:qc",
+  });
+  await walkToReleased(qcId, { customerName: "Mei Tan", customerEmail: "mei.tan@example.com", customerPhone: "0400 111 005" }, freeStanding, actor, "DEMO-QC");
+  await mustStep(qcId, "start_production");
+  await mustStep(qcId, "start_qc");
+  let bundle = await loadOrderBundle((await getOrder(qcId))!);
+  for (const p of bundle.release!.payload.panels.slice(0, 6)) {
+    await logEvent(qcId, bundle.release!.releaseKey, "panel_inspected", { panelId: p.id, pass: true, notes: "demo" }, actor);
+  }
+  await db.insert(costRecords).values([
+    { id: newId("cost"), orderId: qcId, category: "board", amountCents: 21_000, minutes: null, note: "2 sheets", recordedBy: actor, createdAt: nowIso() },
+    { id: newId("cost"), orderId: qcId, category: "hardware", amountCents: 9_500, minutes: null, note: null, recordedBy: actor, createdAt: nowIso() },
+    { id: newId("cost"), orderId: qcId, category: "presales_engineering", amountCents: 6_000, minutes: 40, note: "review + quote", recordedBy: actor, createdAt: nowIso() },
+  ]);
+
+  // 6. Delivered — every panel inspected, packed, shipped; assembly guide is live.
+  const deliveredId = await createDraftOrder({
+    customerId: DEMO_CUSTOMER_ID,
+    templateId: "TPL-LOW-D",
+    purpose: "living_room_storage",
+    postcode: "3000",
+    deliveryMethod: "local_delivery",
+    width_mm: 1200,
+    budgetCents: 170_000,
+    timeframe: "1-3 months",
+    needsInstallation: true,
+    customerName: "Chris Walsh",
+    customerEmail: "chris.walsh@example.com",
+    customerPhone: "0400 111 006",
+    referralSource: "demo:delivered",
+  });
+  await walkToReleased(deliveredId, { customerName: "Chris Walsh", customerEmail: "chris.walsh@example.com", customerPhone: "0400 111 006" }, freeStanding, actor, "DEMO-DEL", { height_mm: 750, antiTip: true });
+  await finishShopFloor(deliveredId, actor);
+  await mustStep(deliveredId, "ship", "local van");
+  await mustStep(deliveredId, "delivered");
+  const costs = await copyQuoteEstimateCosts({ ok: false }, formFields({ orderId: deliveredId }));
+  if (!costs.ok) throw new Error(`Copy quote estimates failed: ${costs.error}`);
+
+  // 7. After-sales — delivered, then a chipped door with a replacement job copied from the original release.
+  const afterId = await createDraftOrder({
+    customerId: DEMO_CUSTOMER_ID,
+    templateId: "TPL-LOW-D",
+    purpose: "general_storage",
+    postcode: "3100",
+    deliveryMethod: "local_delivery",
+    width_mm: 1500,
+    budgetCents: 190_000,
+    timeframe: "1-3 months",
+    needsInstallation: false,
+    customerName: "Taylor Ng",
+    customerEmail: "taylor.ng@example.com",
+    customerPhone: "0400 111 007",
+    referralSource: "demo:aftersales",
+  });
+  await walkToReleased(afterId, { customerName: "Taylor Ng", customerEmail: "taylor.ng@example.com", customerPhone: "0400 111 007" }, freeStanding, actor, "DEMO-AS", { height_mm: 750, antiTip: true });
+  await finishShopFloor(afterId, actor);
+  await mustStep(afterId, "ship", "local van");
+  await mustStep(afterId, "delivered");
+  order = (await getOrder(afterId))!;
+  await transition(order, "aftersales");
+  bundle = await loadOrderBundle((await getOrder(afterId))!);
+  const door = bundle.release!.payload.panels.find((p) => p.role === "DOOR") ?? bundle.release!.payload.panels[0]!;
+  const caseId = newId("case");
+  await db.insert(serviceCases).values({
+    id: caseId,
+    orderId: afterId,
+    releaseKey: bundle.release!.releaseKey,
+    partRef: door.id,
+    partKind: "panel",
+    severity: "blocking",
+    symptom: `Front edge of ${door.label} (${door.name}) arrived chipped in transit. Hole pattern matches the label; please remake from the original release.`,
+    photoRefs: [],
+    costCents: 0,
+    status: "open",
+    openedBy: "customer",
+    createdAt: nowIso(),
+  });
+  const repl = await createReplacementRelease({ ok: false }, formFields({ orderId: afterId, caseId }));
+  if (!repl.ok) throw new Error(`Replacement failed: ${repl.error}`);
+
+  await db.insert(enquiries).values({
+    id: newId("enq"),
+    purpose: "tv_stand",
+    postcode: "2000",
+    budgetCents: 200_000,
+    timeframe: "As soon as possible",
+    needsInstallation: true,
+    reasons: ["TV-bearing furniture is not in the launch range.", "Postcode 2000 is outside the current delivery area."],
+    contact: "Riley Hart · 0400 111 000",
+    notes: DEMO_ENQUIRY_NOTE,
+    createdAt: nowIso(),
+  });
+
+  revalidatePath("/admin");
+  revalidatePath("/admin/orders");
+  revalidatePath("/admin/cases");
+  revalidatePath("/admin/demo");
+  revalidatePath("/demo");
+  revalidatePath("/orders");
+  return { ok: true, message: "Demo pipeline ready: draft, submitted, quoted, confirmed (paid), QC, delivered, after-sales with replacement, plus one out-of-range enquiry." };
+}
+
+async function wipeDemoRecords(): Promise<void> {
+  const db = await getDb();
+  const demo = await db.select({ id: orders.id }).from(orders).where(eq(orders.customerId, DEMO_CUSTOMER_ID));
+  const ids = demo.map((o) => o.id);
+  if (ids.length) {
+    await db.delete(media).where(inArray(media.orderId, ids));
+    await db.delete(serviceCases).where(inArray(serviceCases.orderId, ids));
+    await db.delete(costRecords).where(inArray(costRecords.orderId, ids));
+    await db.delete(productionEvents).where(inArray(productionEvents.orderId, ids));
+    await db.delete(releases).where(inArray(releases.orderId, ids));
+    await db.delete(payments).where(inArray(payments.orderId, ids));
+    await db.delete(confirmations).where(inArray(confirmations.orderId, ids));
+    await db.delete(quotes).where(inArray(quotes.orderId, ids));
+    await db.delete(reviews).where(inArray(reviews.orderId, ids));
+    await db.delete(designVersions).where(inArray(designVersions.orderId, ids));
+    await db.delete(orders).where(inArray(orders.id, ids));
+  }
+  await db.delete(enquiries).where(eq(enquiries.notes, DEMO_ENQUIRY_NOTE));
+}
+
+function formFields(fields: Record<string, string>): FormData {
   const fd = new FormData();
-  fd.set("orderId", orderId);
-  fd.set("intent", intent);
+  for (const [k, v] of Object.entries(fields)) fd.set(k, v);
+  return fd;
+}
+
+function stepForm(orderId: string, intent: string, text?: string): FormData {
+  const fd = formFields({ orderId, intent });
+  if (text) fd.set("text", text);
   return fd;
 }
 
@@ -634,17 +839,72 @@ async function walkToQuoted(orderId: string, contact: Record<string, string>, me
   order = (await getOrder(orderId))!;
   await transition(order, "submitted", contact);
   order = (await getOrder(orderId))!;
-  const reviewForm = new FormData();
-  reviewForm.set("orderId", orderId);
-  reviewForm.set("decision", "approved");
-  reviewForm.set("notes", `Demo approval by ${actor}: dimensions, span and delivery checked.`);
-  const review = await recordReview({ ok: false }, reviewForm);
+  const review = await recordReview({ ok: false }, formFields({ orderId, decision: "approved", notes: `Demo approval by ${actor}: dimensions, span and delivery checked.` }));
   if (!review.ok) throw new Error(`Demo review failed: ${review.error}`);
-  const quoteForm = new FormData();
-  quoteForm.set("orderId", orderId);
-  quoteForm.set("leadTimeDays", "21");
-  quoteForm.set("validityDays", "7");
-  const quote = await issueQuote({ ok: false }, quoteForm);
+  const quote = await issueQuote({ ok: false }, formFields({ orderId, leadTimeDays: "21", validityDays: "7" }));
   if (!quote.ok) throw new Error(`Demo quote failed: ${quote.error}`);
   return (await getOrder(orderId))!;
+}
+
+async function walkToPaid(orderId: string, contact: Record<string, string>, measurement: MeasurementSet, actor: string, payRef: string, opts?: { height_mm?: number; antiTip?: boolean }): Promise<Order> {
+  if (opts?.height_mm) {
+    let order = (await getOrder(orderId))!;
+    const current = await currentDesignVersion(order);
+    const next: DesignSpec = {
+      ...current.design,
+      finished: { ...current.design.finished, height_mm: opts.height_mm },
+      installation: { ...current.design.installation, wallType: opts.antiTip ? "masonry" : current.design.installation.wallType, antiTipAcknowledged: opts.antiTip ?? current.design.installation.antiTipAcknowledged },
+    };
+    await appendDesignVersion(order, next, measurement, "customer", `Demo height ${opts.height_mm} mm`);
+  }
+  await walkToQuoted(orderId, contact, measurement, actor);
+  const quotedOrder = (await getOrder(orderId))!;
+  const current = await currentDesignVersion(quotedOrder);
+  const acks = Object.fromEntries(requiredAcknowledgements(current.engineering.cabinet?.antiTipRequired ?? false).map((k) => [k, true]));
+  const confirmed = await confirmCurrentVersion(quotedOrder, contact.customerName ?? "Demo Customer", acks);
+  if (!confirmed.ok) throw new Error(`Demo confirmation failed: ${confirmed.error}`);
+  const bundle = await loadOrderBundle((await getOrder(orderId))!);
+  const db = await getDb();
+  await db
+    .insert(payments)
+    .values({
+      id: newId("pay"),
+      orderId,
+      idempotencyKey: `${orderId}:demo:${payRef}`,
+      kind: "balance",
+      amountCents: bundle.quote!.totalCents,
+      method: "bank_transfer",
+      reference: payRef,
+      note: "Demo settlement",
+      recordedBy: actor,
+      createdAt: nowIso(),
+    })
+    .onConflictDoNothing();
+  await recomputePaymentStatus(orderId);
+  await logEvent(orderId, null, "materials_confirmed", { designVersion: bundle.order.currentDesignVersion, note: "demo batch" }, actor);
+  await logEvent(orderId, null, "capacity_confirmed", { designVersion: bundle.order.currentDesignVersion, note: "demo slot" }, actor);
+  return (await getOrder(orderId))!;
+}
+
+async function mustStep(orderId: string, intent: string, text?: string): Promise<void> {
+  const res = await runProductionStep({ ok: false }, stepForm(orderId, intent, text));
+  if (!res.ok) throw new Error(`${intent} failed: ${res.error} ${res.reasons?.join("; ") ?? ""}`);
+}
+
+async function walkToReleased(orderId: string, contact: Record<string, string>, measurement: MeasurementSet, actor: string, payRef: string, opts?: { height_mm?: number; antiTip?: boolean }): Promise<void> {
+  await walkToPaid(orderId, contact, measurement, actor, payRef, opts);
+  await mustStep(orderId, "release");
+}
+
+async function finishShopFloor(orderId: string, actor: string): Promise<void> {
+  await mustStep(orderId, "start_production");
+  await mustStep(orderId, "start_qc");
+  const bundle = await loadOrderBundle((await getOrder(orderId))!);
+  const rel = bundle.release!;
+  for (const p of rel.payload.panels) {
+    await logEvent(orderId, rel.releaseKey, "panel_inspected", { panelId: p.id, pass: true, notes: "demo" }, actor);
+  }
+  for (const pkg of rel.payload.packaging.packages) {
+    await logEvent(orderId, rel.releaseKey, "package_packed", { code: pkg.code, weight_kg: pkg.weight_kg, planned_kg: pkg.weight_kg, deviation_kg: 0, verified: true }, actor);
+  }
 }

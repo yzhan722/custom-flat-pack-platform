@@ -17,6 +17,9 @@ export default function HomePage() {
           <div className="mt-6 flex flex-wrap gap-3">
             <Link href="/start" className="btn-primary">Start a design</Link>
             <Link href="/templates" className="btn-secondary">See the two templates</Link>
+            {process.env.NODE_ENV !== "production" ? (
+              <Link href="/demo" className="btn-secondary">Presenter demo</Link>
+            ) : null}
           </div>
           <p className="mt-4 text-sm text-ink-soft">Local delivery or pickup only during the pilot. Prices from about {money(Math.min(...templates.map((t) => t.indicativePrice_cents.min)))} incl. GST.</p>
         </div>

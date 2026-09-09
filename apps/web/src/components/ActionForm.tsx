@@ -32,7 +32,7 @@ export function ActionForm({
   hideSubmit?: boolean;
   encType?: string;
 }) {
-  const [state, formAction] = useActionState(action, INITIAL);
+  const [state, formAction, pending] = useActionState(action, INITIAL);
   return (
     <form
       action={formAction}
@@ -43,17 +43,22 @@ export function ActionForm({
       }}
     >
       {children}
-      {!hideSubmit && <SubmitButton className={submitClassName}>{submitLabel ?? "Save"}</SubmitButton>}
+      {!hideSubmit && (
+        <SubmitButton className={submitClassName} pending={pending}>
+          {submitLabel ?? "Save"}
+        </SubmitButton>
+      )}
       <FormMessage state={state} />
     </form>
   );
 }
 
-export function SubmitButton({ children, className = "btn-primary" }: { children: React.ReactNode; className?: string }) {
-  const { pending } = useFormStatus();
+export function SubmitButton({ children, className = "btn-primary", pending }: { children: React.ReactNode; className?: string; pending?: boolean }) {
+  const status = useFormStatus();
+  const isPending = pending ?? status.pending;
   return (
-    <button type="submit" className={cn(className, "mt-3")} disabled={pending} aria-busy={pending}>
-      {pending ? "Working…" : children}
+    <button type="submit" className={cn(className, "mt-3")} disabled={isPending} aria-busy={isPending ? true : undefined}>
+      {isPending ? "Working…" : children}
     </button>
   );
 }

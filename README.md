@@ -23,7 +23,8 @@ npm run dev          # http://localhost:3000
 
 - 消费端入口：`/`，从「Start a design」进入 FR-01 门槛问卷，再到配置器。
 - 后台：`/admin`，开发默认密码 `admin`（通过 `.env` 里的 `ADMIN_PASSWORD` / `AUTH_SECRET` 修改，见 `apps/web/.env.example`）。
-- 后台首页有「Create demo orders」按钮（仅非生产环境），会用真实业务流程生成 4 个处于不同阶段的订单：草稿、待复核、已报价、生产中。
+- 演示脚本：`/demo`（需员工登录，开发环境），或后台导航「Demo」。先点「Seed demo pipeline」，再按七段口播走：草稿配置器、待复核、已报价、已付款未放行、质检未齐套、已交付装配指南、售后补件；另有一条电视柜／区外询价。重复播种只会重置 `cus_demo` 订单。
+- 「Open My orders as demo customer」会把本机客户 cookie 设为 `cus_demo`，即可在 `/orders` 看到这七单。
 - 演示服务区邮编为 3000–3207（`apps/web/src/db/seed-data.ts`），上线前必须替换为运营已核价的邮编。
 
 其他脚本：
@@ -86,6 +87,7 @@ flowchart LR
 | `/orders/[orderId]/confirm` | FR-07 二维图、可见结构、材料与荷载说明、正式报价、逐项确认与签名；保存快照与哈希 |
 | `/orders/[orderId]/assembly` | FR-11 本单装配指南（可打印、按板件/五金袋反查） |
 | `/guide/[releaseKey]` | 标签二维码入口：只显示装配指南，不含客户与付款信息 |
+| `/demo` | 讲解脚本（开发环境、员工登录）；七段演示订单深链 |
 | `/orders/[orderId]/support` | FR-12 按板件／五金袋编号开售后单，可上传照片 |
 
 后台（`/admin`）：

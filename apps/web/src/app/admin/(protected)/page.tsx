@@ -4,6 +4,7 @@ import { ActionForm } from "@/components/ActionForm";
 import { OrderStatusBadge, EngineeringBadge, PaymentBadge } from "@/components/Badges";
 import { dateTime } from "@/lib/format";
 import { seedDemoOrders } from "@/server/actions/admin";
+import { demoToolsEnabled } from "@/lib/demo";
 import { countOrdersByStatus, listAllOrders, listAllServiceCases, listEnquiries } from "@/server/queries";
 
 const QUEUE: OrderStatus[] = ["submitted", "quoted", "confirmed", "released", "in_production", "qc_packing", "shipped", "aftersales"];
@@ -18,7 +19,7 @@ export default async function AdminHome() {
         <p className="text-sm text-ink-soft">Work queue by stage. Each order carries independent order, engineering and payment states; release needs all three.</p>
       </div>
       <div className="grid gap-3 md:grid-cols-4 lg:grid-cols-8">
-        {(["draft", "submitted", "quoted", "confirmed", "released", "in_production", "qc_packing", "shipped"] as OrderStatus[]).map((s) => (
+        {(["draft", "submitted", "quoted", "confirmed", "released", "in_production", "qc_packing", "shipped", "delivered", "aftersales", "completed"] as OrderStatus[]).map((s) => (
           <Link key={s} href={`/admin/orders?status=${s}`} className="card p-3 hover:border-brand">
             <p className="text-2xl font-semibold tabular-nums">{counts[s] ?? 0}</p>
             <p className="text-xs text-ink-soft">{ORDER_STATUS_LABELS[s].en.split(" — ")[0]}</p>
@@ -57,11 +58,14 @@ export default async function AdminHome() {
             <p className="mt-1 text-ink-soft">{enquiries.length} kept. Use them to decide the next postcode or purpose to open.</p>
             <Link href="/admin/enquiries" className="btn-secondary btn-sm mt-2">Review</Link>
           </section>
-          {process.env.NODE_ENV !== "production" && (
+          {demoToolsEnabled() && (
             <section className="card text-sm">
-              <h3 className="font-semibold">Demo data</h3>
-              <p className="mt-1 text-ink-soft">Creates four orders at different stages by running the real workflow (review, quote, confirmation, release). Development only.</p>
-              <ActionForm action={seedDemoOrders} submitLabel="Create demo orders" submitClassName="btn-secondary btn-sm" />
+              <h3 className="font-semibold">Demo pipeline</h3>
+              <p className="mt-1 text-ink-soft">Seven real orders plus one out-of-range enquiry: draft, submitted, quoted, paid (not released), QC, delivered, after-sales with a replacement job. Re-seeding replaces the previous demo rows only.</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <Link href="/admin/demo" className="btn-primary btn-sm">Presenter script</Link>
+              </div>
+              <ActionForm action={seedDemoOrders} submitLabel="Reset demo pipeline" submitClassName="btn-secondary btn-sm" confirmText="Replace current demo orders with a fresh pipeline?" />
             </section>
           )}
         </aside>

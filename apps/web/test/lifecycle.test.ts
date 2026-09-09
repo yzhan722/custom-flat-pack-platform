@@ -40,7 +40,7 @@ describe("order lifecycle (PRD §4, §7)", () => {
   });
 
   it("FR-01 gate refuses unsupported purposes and out-of-area delivery, keeps enquiry", async () => {
-    const tv = await startOrder(INIT, form({ purpose: "tv_stand", templateId: "TPL-LOW-D", postcode: "3000", deliveryMethod: "local_delivery" }));
+    const tv = await startOrder(INIT, form({ purpose: "tv_stand", templateId: "TPL-LOW-D", postcode: "3000", deliveryMethod: "local_delivery", width_mm: "" }));
     expect(tv.ok).toBe(false);
     expect(tv.reasons?.join(" ")).toMatch(/TV-bearing/);
     const far = await startOrder(INIT, form({ purpose: "general_storage", templateId: "TPL-LOW-D", postcode: "2000", deliveryMethod: "local_delivery" }));
@@ -386,22 +386,52 @@ describe("change control (PRD §7.2)", () => {
     expect(withPhoto.ok).toBe(true);
   });
 
-  it("demo seed walks four orders through the real workflow", async () => {
+  it("demo seed walks a seven-stage pipeline and is idempotent", async () => {
     jar.clear();
     await signInAdmin("test-admin");
-    const before = (await listAllOrders()).length;
     const res = await seedDemoOrders(INIT, new FormData());
     expect(res).toMatchObject({ ok: true });
     const demo = (await listAllOrders()).filter((o) => o.customerId === "cus_demo");
-    expect(demo.length).toBe(4);
-    expect((await listAllOrders()).length).toBe(before + 4);
-    expect(demo.map((o) => o.status).sort()).toEqual(["draft", "qc_packing", "quoted", "submitted"]);
-    const prod = demo.find((o) => o.status === "qc_packing")!;
-    const b = await loadOrderBundle(prod);
-    expect(b.release?.status).toBe("active");
-    expect(b.order.paymentStatus).toBe("settled");
-    expect(shipmentBlockers(b).length).toBeGreaterThan(0);
-  });
+    expect(demo).toHaveLength(7);
+    expect(demo.map((o) => o.status).sort()).toEqual(["aftersales", "confirmed", "delivered", "draft", "qc_packing", "quoted", "submitted"]);
+
+    const byRef = Object.fromEntries(demo.map((o) => [o.referralSource, o]));
+    expect(byRef["demo:draft"]?.customerName).toBe("Jordan Blake");
+    expect(byRef["demo:submitted"]?.status).toBe("submitted");
+    expect(byRef["demo:quoted"]?.status).toBe("quoted");
+
+    const confirmed = byRef["demo:confirmed"]!;
+    expect(confirmed.status).toBe("confirmed");
+    expect(confirmed.paymentStatus).toBe("settled");
+    const confirmedBundle = await loadOrderBundle(confirmed);
+    expect(confirmedBundle.release).toBeNull();
+    expect(releaseGateFor(confirmedBundle).ok).toBe(true);
+
+    const qc = byRef["demo:qc"]!;
+    const qcBundle = await loadOrderBundle(qc);
+    expect(qcBundle.release?.status).toBe("active");
+    expect(qc.paymentStatus).toBe("settled");
+    expect(shipmentBlockers(qcBundle).length).toBeGreaterThan(0);
+
+    const delivered = byRef["demo:delivered"]!;
+    expect(delivered.status).toBe("delivered");
+    const deliveredBundle = await loadOrderBundle(delivered);
+    expect(shipmentBlockers(deliveredBundle)).toEqual([]);
+    expect(deliveredBundle.costs.length).toBeGreaterThan(0);
+
+    const after = byRef["demo:aftersales"]!;
+    const afterBundle = await loadOrderBundle(after);
+    expect(afterBundle.order.status).toBe("aftersales");
+    expect(afterBundle.release?.kind).not.toBe("replacement");
+    const repl = afterBundle.releases.find((r) => r.kind === "replacement");
+    expect(repl).toBeDefined();
+    expect(repl!.payload.panels).toHaveLength(1);
+    expect(repl!.payload.panels[0]!.id).toBe(afterBundle.cases[0]!.partRef);
+
+    const again = await seedDemoOrders(INIT, new FormData());
+    expect(again).toMatchObject({ ok: true });
+    expect((await listAllOrders()).filter((o) => o.customerId === "cus_demo")).toHaveLength(7);
+  }, 120_000);
 
   it("a reviewer cannot approve past an UNSUPPORTED verdict", async () => {
     jar.clear();

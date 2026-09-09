@@ -62,13 +62,17 @@ export async function getCustomerId(): Promise<string | null> {
   return id;
 }
 
+export async function setCustomerId(id: string): Promise<void> {
+  const jar = await cookies();
+  jar.set(CUSTOMER_COOKIE, `${id}.${sign(id)}`, { httpOnly: true, sameSite: "lax", path: "/", maxAge: 60 * 60 * 24 * 365 });
+}
+
 /** Only callable from server actions / route handlers (cookies are writable there). */
 export async function ensureCustomerId(): Promise<string> {
   const existing = await getCustomerId();
   if (existing) return existing;
   const id = `cus_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-  const jar = await cookies();
-  jar.set(CUSTOMER_COOKIE, `${id}.${sign(id)}`, { httpOnly: true, sameSite: "lax", path: "/", maxAge: 60 * 60 * 24 * 365 });
+  await setCustomerId(id);
   return id;
 }
 

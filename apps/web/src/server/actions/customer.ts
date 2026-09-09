@@ -33,6 +33,11 @@ export interface ActionState {
 
 const PURPOSE_IDS = catalog.listPurposes().map((p) => p.id) as [Purpose, ...Purpose[]];
 
+function emptyToUndef(v: unknown): unknown {
+  if (v === "" || v === null || v === undefined) return undefined;
+  return v;
+}
+
 const StartSchema = z.object({
   purpose: z.enum(PURPOSE_IDS),
   templateId: z.string().min(1),
@@ -41,7 +46,7 @@ const StartSchema = z.object({
   budget: z.string().trim().optional(),
   timeframe: z.string().trim().max(50).optional(),
   needsInstallation: z.string().optional(),
-  width_mm: z.coerce.number().int().min(50).max(6000).optional(),
+  width_mm: z.preprocess(emptyToUndef, z.coerce.number().int().min(50).max(6000).optional()),
 });
 
 /** FR-01: service range and purpose gate. Creates a draft order only when everything is supported. */

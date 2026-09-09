@@ -13,6 +13,9 @@ export default async function AdminLayout({ children }: { children: React.ReactN
         <div className="mx-auto flex max-w-[1400px] items-center justify-between px-4 py-2.5 text-sm">
           <div className="flex items-center gap-5">
             <Link href="/admin" className="font-semibold">Back office</Link>
+            {process.env.NODE_ENV !== "production" ? (
+              <Link href="/admin/demo" className="text-amber-300 hover:text-white">Demo</Link>
+            ) : null}
             <Link href="/admin/orders" className="text-stone-300 hover:text-white">Orders</Link>
             <Link href="/admin/cases" className="text-stone-300 hover:text-white">After-sales</Link>
             <Link href="/admin/enquiries" className="text-stone-300 hover:text-white">Enquiries</Link>

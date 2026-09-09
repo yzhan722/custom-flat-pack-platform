@@ -324,7 +324,7 @@ export default async function AdminOrderPage({ params }: { params: Promise<{ id:
                       const inspect = inspectionState(b, repl.releaseKey);
                       const blockers = shipmentBlockers(b, repl);
                       return (
-                        <div key={repl.releaseKey} className="mt-3 rounded-md border border-line bg-stone-50 p-3">
+                        <div key={repl.releaseKey} id="replacement" className="mt-3 rounded-md border border-line bg-stone-50 p-3">
                           <p className="text-xs font-semibold">Replacement {repl.releaseKey} · {repl.payload.replacement?.partRef} · {repl.status}</p>
                           <div className="mt-2 flex flex-wrap gap-2 text-xs">
                             <a className="btn-secondary btn-sm" href={`/admin/orders/${order.id}/release/${repl.releaseKey}/cutlist.csv`}>Cut list CSV</a>

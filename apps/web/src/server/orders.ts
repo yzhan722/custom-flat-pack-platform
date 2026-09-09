@@ -30,6 +30,10 @@ export interface NewOrderInput {
   budgetCents: number | null;
   timeframe: string | null;
   needsInstallation: boolean;
+  customerName?: string | null;
+  customerEmail?: string | null;
+  customerPhone?: string | null;
+  referralSource?: string | null;
 }
 
 /** Creates a draft order with design version 1 from template defaults. */
@@ -54,6 +58,10 @@ export async function createDraftOrder(input: NewOrderInput): Promise<string> {
     budgetCents: input.budgetCents,
     timeframe: input.timeframe,
     needsInstallation: input.needsInstallation,
+    referralSource: input.referralSource ?? null,
+    customerName: input.customerName ?? null,
+    customerEmail: input.customerEmail ?? null,
+    customerPhone: input.customerPhone ?? null,
     templateId: template.id,
     currentDesignVersion: 1,
     factoryId: pilotFactory().id,
