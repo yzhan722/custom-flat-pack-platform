@@ -3,6 +3,7 @@ import {
   addDays,
   assertTransition,
   buildProductionRelease,
+  buildReplacementRelease,
   canTransition,
   cutListCsv,
   cutListRows,
@@ -14,7 +15,7 @@ import {
   type ProductionReleaseInput,
   type ReleaseGateInput,
 } from "../src";
-import { design, run, verifiedMeasurement } from "./helpers";
+import { design, factory, run, verifiedMeasurement } from "./helpers";
 
 describe("order state machine (PRD §7.1)", () => {
   it("allows the main path and blocks skipping", () => {
@@ -102,41 +103,41 @@ describe("quote validity", () => {
   });
 });
 
-describe("production release package (FR-08)", () => {
-  function input(): ProductionReleaseInput {
-    const d = design("TPL-LOW-D", { width_mm: 1000, height_mm: 750, depth_mm: 450, installation: { wallType: "masonry", antiTipAcknowledged: true, deliveryPostcode: "3000", deliveryMethod: "local_delivery" } });
-    const r = run(d, verifiedMeasurement(1100));
-    return {
-      orderId: "ord_test",
-      designVersion: 2,
-      engineeringHash: r.engineeringHash!,
-      design: r.design!,
-      cabinet: r.cabinet!,
-      bom: r.bom!,
-      packaging: r.packaging!,
-      assembly: r.assembly!,
-      report: r.report!,
-      price: r.price!,
-      quote: { id: "quo_1", total_cents: r.price!.totalIncGst_cents },
-      approval: { reviewId: "rev_1", approvedBy: "eng", approvedAt: "2026-09-08T00:00:00Z", notes: "ok" },
-      confirmation: { id: "cnf_1", confirmedAt: "2026-09-08T01:00:00Z", snapshotHash: "snap" },
-      factory: { id: "FAC-PILOT-01", version: 1, adapter: "manual-csv" },
-      versions: { ruleSetVersion: r.versions!.ruleSetVersion, priceListId: "PL-PILOT", priceListVersion: 1 },
-      loadStatement: { shelf_kg: 15, top_kg: 30 },
-      sequence: 1,
-    };
-  }
+function productionInput(): ProductionReleaseInput {
+  const d = design("TPL-LOW-D", { width_mm: 1000, height_mm: 750, depth_mm: 450, installation: { wallType: "masonry", antiTipAcknowledged: true, deliveryPostcode: "3000", deliveryMethod: "local_delivery" } });
+  const r = run(d, verifiedMeasurement(1100));
+  return {
+    orderId: "ord_test",
+    designVersion: 2,
+    engineeringHash: r.engineeringHash!,
+    design: r.design!,
+    cabinet: r.cabinet!,
+    bom: r.bom!,
+    packaging: r.packaging!,
+    assembly: r.assembly!,
+    report: r.report!,
+    price: r.price!,
+    quote: { id: "quo_1", total_cents: r.price!.totalIncGst_cents },
+    approval: { reviewId: "rev_1", approvedBy: "eng", approvedAt: "2026-09-08T00:00:00Z", notes: "ok" },
+    confirmation: { id: "cnf_1", confirmedAt: "2026-09-08T01:00:00Z", snapshotHash: "snap" },
+    factory: { id: "FAC-PILOT-01", version: 1, adapter: "manual-csv" },
+    versions: { ruleSetVersion: r.versions!.ruleSetVersion, priceListId: "PL-PILOT", priceListVersion: 1 },
+    loadStatement: { shelf_kg: 15, top_kg: 30 },
+    sequence: 1,
+  };
+}
 
+describe("production release package (FR-08)", () => {
   it("is deterministic and keyed by order, version, hash and sequence", () => {
-    const a = buildProductionRelease(input());
-    const b = buildProductionRelease(input());
+    const a = buildProductionRelease(productionInput());
+    const b = buildProductionRelease(productionInput());
     expect(a.contentHash).toBe(b.contentHash);
-    expect(a.payload.releaseKey).toBe(releaseKeyFor("ord_test", 2, input().engineeringHash, 1));
-    expect(buildProductionRelease({ ...input(), sequence: 2 }).payload.releaseKey).not.toBe(a.payload.releaseKey);
+    expect(a.payload.releaseKey).toBe(releaseKeyFor("ord_test", 2, productionInput().engineeringHash, 1));
+    expect(buildProductionRelease({ ...productionInput(), sequence: 2 }).payload.releaseKey).not.toBe(a.payload.releaseKey);
   });
 
   it("carries labels for every panel, documents and safety flags", () => {
-    const rel = buildProductionRelease(input());
+    const rel = buildProductionRelease(productionInput());
     expect(rel.payload.labels.length).toBe(rel.payload.panels.length);
     expect(rel.payload.labels[0]!.qrPayload).toMatch(/^cfp:release\/REL-[0-9A-F]{16}\/panel\//);
     expect(rel.payload.documents).toContain("TOPPLING_WARNING_LABEL");
@@ -146,12 +147,12 @@ describe("production release package (FR-08)", () => {
   });
 
   it("refuses to build for an unsupported design", () => {
-    const i = input();
+    const i = productionInput();
     expect(() => buildProductionRelease({ ...i, report: { ...i.report, verdict: "UNSUPPORTED" } })).toThrow(/unsupported/);
   });
 
   it("exports a cut list and operation list with one row per panel / operation", () => {
-    const rel = buildProductionRelease(input());
+    const rel = buildProductionRelease(productionInput());
     const rows = cutListRows(rel.payload);
     expect(rows.length).toBe(rel.payload.panels.length);
     const csv = cutListCsv(rel.payload);
@@ -160,5 +161,108 @@ describe("production release package (FR-08)", () => {
     const ops = operationsCsv(rel.payload);
     const opCount = rel.payload.panels.reduce((acc, p) => acc + p.operations.length, 0);
     expect(ops.split("\n").length).toBe(opCount + 1);
+  });
+});
+
+describe("replacement release (FR-12, PRD §7.2)", () => {
+  function original() {
+    return buildProductionRelease(productionInput());
+  }
+
+  function replacePanel(partRef: string, sequence = 2, serviceCaseId = "case_door") {
+    return buildReplacementRelease({
+      source: original().payload,
+      sequence,
+      serviceCaseId,
+      partKind: "panel",
+      partRef,
+      factory,
+      requestedAt: "2026-09-10T00:00:00Z",
+    });
+  }
+
+  it("copies one panel verbatim from the old release, not from a later compilation", () => {
+    const source = original();
+    const door = source.payload.panels.find((p) => p.id === "M1-DOOR-L");
+    expect(door).toBeDefined();
+    const later = run(
+      design("TPL-LOW-D", {
+        width_mm: 1800,
+        height_mm: 750,
+        depth_mm: 450,
+        installation: { wallType: "masonry", antiTipAcknowledged: true, deliveryPostcode: "3000", deliveryMethod: "local_delivery" },
+      }),
+      verifiedMeasurement(1900),
+    );
+    expect(later.design!.finished.width_mm).not.toBe(source.payload.design.finished.width_mm);
+    const laterDoor = later.cabinet!.panels.find((p) => p.id === "M1-DOOR-L");
+    expect(laterDoor!.finished.length_um).not.toBe(door!.finished.length_um);
+
+    const repl = replacePanel("M1-DOOR-L");
+    expect(repl.payload.kind).toBe("replacement");
+    expect(repl.payload.panels).toHaveLength(1);
+    expect(repl.payload.panels[0]).toEqual(door);
+    expect(repl.payload.design.finished.width_mm).toBe(source.payload.design.finished.width_mm);
+    expect(repl.payload.design.templateVersion).toBe(source.payload.design.templateVersion);
+    expect(repl.payload.replacement).toEqual({
+      sourceReleaseKey: source.payload.releaseKey,
+      serviceCaseId: "case_door",
+      partKind: "panel",
+      partRef: "M1-DOOR-L",
+      copiedFrom: {
+        engineeringHash: source.payload.engineeringHash,
+        designVersion: source.payload.designVersion,
+        templateId: source.payload.versions.templateId,
+        templateVersion: source.payload.versions.templateVersion,
+        constructionId: source.payload.versions.constructionId,
+        constructionVersion: source.payload.versions.constructionVersion,
+      },
+    });
+    expect(repl.payload.labels).toHaveLength(1);
+    expect(repl.payload.labels[0]!.line3).toMatch(/REPLACEMENT/);
+    expect(repl.payload.labels[0]!.line3).toContain(source.payload.releaseKey);
+    expect(repl.payload.packaging.packages).toHaveLength(1);
+    expect(repl.payload.packaging.packages[0]!.contents).toEqual([{ kind: "panel", ref: "M1-DOOR-L", label: `${door!.label} ${door!.name}` }]);
+    expect(repl.payload.hardware.lines).toEqual([]);
+    expect(repl.payload.summary.flags).toContain("REPLACEMENT");
+    expect(repl.payload.releaseKey).toBe(releaseKeyFor("ord_test", 2, source.payload.engineeringHash, 2));
+    expect(repl.payload.releaseKey).not.toBe(source.payload.releaseKey);
+  });
+
+  it("rejects a part that is not in the original release", () => {
+    expect(() => replacePanel("M9-NOPE")).toThrow(/not in release/);
+  });
+
+  it("copies a hardware bag from the original BOM without looking up current SKUs", () => {
+    const source = original();
+    const bag = source.payload.hardware.bags[0];
+    expect(bag).toBeDefined();
+    const expectedLines = source.payload.hardware.lines.filter((l) => l.bagCode === bag!.bagCode);
+    const repl = buildReplacementRelease({
+      source: source.payload,
+      sequence: 3,
+      serviceCaseId: "case_bag",
+      partKind: "hardware_bag",
+      partRef: bag!.bagCode,
+      factory,
+      requestedAt: "2026-09-10T00:00:00Z",
+    });
+    expect(repl.payload.panels).toEqual([]);
+    expect(repl.payload.hardware.bags).toEqual([bag]);
+    expect(repl.payload.hardware.lines).toEqual(expectedLines);
+    expect(repl.payload.hardware.hardwareSystemId).toBe(source.payload.hardware.hardwareSystemId);
+    expect(repl.payload.hardware.hardwareSystemVersion).toBe(source.payload.hardware.hardwareSystemVersion);
+    expect(repl.payload.packaging.packages).toHaveLength(1);
+    expect(repl.payload.packaging.packages[0]!.contents[0]).toMatchObject({ kind: "hardware_bag", ref: bag!.bagCode });
+    expect(repl.payload.labels).toEqual([]);
+  });
+
+  it("is deterministic and does not share references with the source payload", () => {
+    const source = original();
+    const a = replacePanel("M1-DOOR-L");
+    const b = replacePanel("M1-DOOR-L");
+    expect(a.contentHash).toBe(b.contentHash);
+    a.payload.panels[0]!.finished.length_um = 1;
+    expect(source.payload.panels.find((p) => p.id === "M1-DOOR-L")!.finished.length_um).not.toBe(1);
   });
 });

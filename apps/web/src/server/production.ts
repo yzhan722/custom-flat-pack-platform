@@ -45,8 +45,8 @@ export interface InspectionState {
   packed: Map<string, { weight_kg: number; at: string }>;
 }
 
-export function inspectionState(bundle: OrderBundle): InspectionState {
-  const key = bundle.release?.releaseKey;
+export function inspectionState(bundle: OrderBundle, releaseKey?: string | null): InspectionState {
+  const key = releaseKey === undefined ? bundle.release?.releaseKey : releaseKey;
   const latest = new Map<string, { pass: boolean; notes: string; at: string }>();
   const packed = new Map<string, { weight_kg: number; at: string }>();
   if (!key) return { latest, packed };
@@ -58,12 +58,12 @@ export function inspectionState(bundle: OrderBundle): InspectionState {
   return { latest, packed };
 }
 
-/** FR-10: everything that must be true before dispatch. */
-export function shipmentBlockers(bundle: OrderBundle): string[] {
-  const rel = bundle.release?.payload;
-  if (!rel) return ["No active release."];
+/** FR-10: everything that must be true before dispatch. Replacement jobs skip original payment and unrelated shop-floor blocks. */
+export function shipmentBlockers(bundle: OrderBundle, release: OrderBundle["release"] = bundle.release): string[] {
+  if (!release) return ["No active release."];
+  const rel = release.payload;
   const problems: string[] = [];
-  const { latest, packed } = inspectionState(bundle);
+  const { latest, packed } = inspectionState(bundle, release.releaseKey);
   for (const p of rel.panels) {
     const r = latest.get(p.id);
     if (r === undefined) problems.push(`Panel ${p.label} (${p.id}) not inspected.`);
@@ -72,8 +72,10 @@ export function shipmentBlockers(bundle: OrderBundle): string[] {
   for (const pkg of rel.packaging.packages) {
     if (!packed.has(pkg.code)) problems.push(`Package ${pkg.code} (${pkg.title}) not packed and verified.`);
   }
-  if (bundle.order.paymentStatus !== "settled") problems.push(`Payment status is ${bundle.order.paymentStatus}.`);
-  for (const b of openBlocks(bundle)) problems.push(`Open block: ${b.reason}`);
+  if (release.kind !== "replacement") {
+    if (bundle.order.paymentStatus !== "settled") problems.push(`Payment status is ${bundle.order.paymentStatus}.`);
+    for (const b of openBlocks(bundle)) problems.push(`Open block: ${b.reason}`);
+  }
   return problems;
 }
 

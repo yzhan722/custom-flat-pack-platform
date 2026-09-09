@@ -175,6 +175,9 @@ export const releases = pgTable("releases", {
   releasedBy: text("released_by").notNull(),
   releasedAt: ts("released_at").notNull(),
   stoppedReason: text("stopped_reason"),
+  kind: text("kind").$type<"production" | "replacement">().notNull().default("production"),
+  sourceReleaseKey: text("source_release_key"),
+  serviceCaseId: text("service_case_id"),
 });
 
 export type ProductionEventKind =
@@ -265,6 +268,18 @@ export const enquiries = pgTable("enquiries", {
   createdAt: ts("created_at").notNull(),
 });
 
+export const media = pgTable("media", {
+  id: text("id").primaryKey(),
+  orderId: text("order_id").notNull(),
+  kind: text("kind").$type<"photo" | "sketch" | "scan" | "other">().notNull(),
+  originalName: text("original_name").notNull(),
+  mime: text("mime").notNull(),
+  sizeBytes: integer("size_bytes").notNull(),
+  sha256: text("sha256").notNull(),
+  createdBy: text("created_by").notNull(),
+  createdAt: ts("created_at").notNull(),
+});
+
 export type Order = typeof orders.$inferSelect;
 export type DesignVersion = typeof designVersions.$inferSelect;
 export type Review = typeof reviews.$inferSelect;
@@ -276,3 +291,4 @@ export type ProductionEvent = typeof productionEvents.$inferSelect;
 export type ServiceCase = typeof serviceCases.$inferSelect;
 export type CostRecord = typeof costRecords.$inferSelect;
 export type Enquiry = typeof enquiries.$inferSelect;
+export type Media = typeof media.$inferSelect;

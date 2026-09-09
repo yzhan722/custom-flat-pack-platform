@@ -10,7 +10,8 @@ import { enquiries, payments, serviceCases } from "@/db/schema";
 import { ensureCustomerId, rememberClaim, tokenMatches } from "@/lib/auth";
 import { catalog, lookupServiceArea } from "@/lib/catalog";
 import { nowIso } from "@/lib/format";
-import { appendDesignVersion, confirmCurrentVersion, createDraftOrder, isDesignEditable, recomputePaymentStatus, requiredAcknowledgements, transition, updateOrder } from "../orders";
+import { isUploadedFile, saveUploads } from "@/server/media";
+import { appendDesignVersion, confirmCurrentVersion, createDraftOrder, isDesignEditable, logEvent, recomputePaymentStatus, requiredAcknowledgements, transition, updateOrder } from "../orders";
 import { activeOrAcceptedQuote, activeRelease, currentDesignVersion, getOrder, getOrderForViewer } from "../queries";
 
 /** Called when a page is opened through its access link; makes later actions work without the token. */
@@ -27,6 +28,7 @@ export interface ActionState {
   reasons?: string[];
   fieldErrors?: Record<string, string>;
   message?: string;
+  refs?: string[];
 }
 
 const PURPOSE_IDS = catalog.listPurposes().map((p) => p.id) as [Purpose, ...Purpose[]];
@@ -241,11 +243,16 @@ const CaseSchema = z.object({
 
 /** FR-12: a case is opened against order + part id; the customer never re-explains the whole design. */
 export async function openServiceCase(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  const parsed = CaseSchema.safeParse(Object.fromEntries(formData.entries()));
+  const fields = Object.fromEntries([...formData.entries()].filter(([, v]) => typeof v === "string"));
+  const parsed = CaseSchema.safeParse(fields);
   if (!parsed.success) return { ok: false, error: "Describe the problem (at least a few words) and pick the part." };
   const i = parsed.data;
   const order = await getOrderForViewer(i.orderId);
   if (!order) return { ok: false, error: "Order not found." };
+  const files = formData.getAll("photos").filter(isUploadedFile);
+  const uploaded = files.length ? await saveUploads(order.id, files, "customer") : { ok: true as const, refs: [] as string[] };
+  if (!uploaded.ok) return uploaded;
+  const textRefs = i.photoRefs ? i.photoRefs.split(/\s+/).filter(Boolean) : [];
   const db = await getDb();
   const release = await activeRelease(order.id);
   await db.insert(serviceCases).values({
@@ -256,7 +263,7 @@ export async function openServiceCase(_prev: ActionState, formData: FormData): P
     partKind: i.partKind,
     severity: i.severity,
     symptom: i.symptom,
-    photoRefs: i.photoRefs ? i.photoRefs.split(/\s+/).filter(Boolean) : [],
+    photoRefs: [...uploaded.refs, ...textRefs],
     costCents: 0,
     status: "open",
     openedBy: "customer",
@@ -265,8 +272,24 @@ export async function openServiceCase(_prev: ActionState, formData: FormData): P
   if (order.status === "delivered" || order.status === "completed" || order.status === "shipped") {
     await transition(order, "aftersales");
   }
+  if (i.severity === "safety") {
+    await logEvent(order.id, release?.releaseKey ?? null, "block_opened", { reason: `Safety case: pause new production of template ${order.templateId} until the cause is found.` }, "customer");
+  }
   revalidatePath(`/orders/${order.id}`);
   return { ok: true, message: "Case opened. We respond within one working day." };
+}
+
+export async function uploadOrderMedia(formData: FormData): Promise<ActionState> {
+  const orderId = String(formData.get("orderId") ?? "");
+  const order = await getOrderForViewer(orderId);
+  if (!order) return { ok: false, error: "Order not found." };
+  const files = formData.getAll("photos").filter(isUploadedFile);
+  if (!files.length) return { ok: false, error: "Choose at least one photo." };
+  const saved = await saveUploads(order.id, files, "customer");
+  if (!saved.ok) return saved;
+  revalidatePath(`/orders/${orderId}`);
+  revalidatePath(`/design/${orderId}/measure`);
+  return { ok: true, refs: saved.refs, message: `${saved.refs.length} photo(s) uploaded.` };
 }
 
 export async function updateContact(_prev: ActionState, formData: FormData): Promise<ActionState> {

@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { convertToMm, type LengthUnit, type MeasuredValue, type MeasurementSet, type MeasurementSource, type Obstacle } from "@cfp/core";
-import { saveMeasurement } from "@/server/actions/customer";
+import { saveMeasurement, uploadOrderMedia } from "@/server/actions/customer";
+import { MediaThumbs } from "@/components/MediaThumbs";
 
 interface Entry {
   value: string;
@@ -59,6 +60,7 @@ export function MeasurementWizard({ orderId, initial, finished, returnTo }: { or
   const [accessNotes, setAccessNotes] = useState(initial?.accessPath?.notes ?? "");
   const [evidence, setEvidence] = useState(initial?.evidence.map((e) => `${e.kind}: ${e.ref}${e.caption ? ` — ${e.caption}` : ""}`).join("\n") ?? "");
   const [confirmedBy, setConfirmedBy] = useState(initial?.confirmedBy ?? "");
+  const [photos, setPhotos] = useState<FileList | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -71,6 +73,19 @@ export function MeasurementWizard({ orderId, initial, finished, returnTo }: { or
       setBusy(false);
       return;
     }
+    const uploaded: MeasurementSet["evidence"] = [];
+    if (photos?.length) {
+      const fd = new FormData();
+      fd.set("orderId", orderId);
+      for (const file of Array.from(photos)) fd.append("photos", file);
+      const up = await uploadOrderMedia(fd);
+      if (!up.ok) {
+        setBusy(false);
+        setError(up.error ?? "Could not upload photos.");
+        return;
+      }
+      for (const ref of up.refs ?? []) uploaded.push({ kind: "photo", ref });
+    }
     const ms: MeasurementSet = {
       spaceConstrained: constrained,
       availableSpace: constrained
@@ -79,7 +94,8 @@ export function MeasurementWizard({ orderId, initial, finished, returnTo }: { or
       internalRequirements: internal.filter((r) => r.description.trim()),
       obstacles: obstacles.filter((o) => o.description.trim()),
       accessPath: passage || accessNotes ? { narrowestPassage_mm: passage ? Number(passage) : undefined, notes: accessNotes || undefined } : undefined,
-      evidence: evidence
+      evidence: [
+        ...evidence
         .split("\n")
         .map((l) => l.trim())
         .filter(Boolean)
@@ -90,6 +106,8 @@ export function MeasurementWizard({ orderId, initial, finished, returnTo }: { or
           const [ref, caption] = rest.split(" — ");
           return { kind, ref: (ref ?? rest).trim(), caption: caption?.trim() || undefined };
         }),
+        ...uploaded,
+      ],
       confirmedBy: confirmedBy || undefined,
     };
     const res = await saveMeasurement(orderId, ms);
@@ -190,9 +208,14 @@ export function MeasurementWizard({ orderId, initial, finished, returnTo }: { or
             </label>
           </div>
           <label className="block text-sm">
-            <span className="label">Photos, sketches, notes (one per line, e.g. “photo: IMG_2031.jpg — alcove from the front”)</span>
+            <span className="label">Photos of the space (optional)</span>
+            <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple className="input" onChange={(e) => setPhotos(e.target.files)} />
+            <span className="text-xs text-ink-soft">Photos are evidence only. They are never turned into production dimensions.</span>
+          </label>
+          {initial?.evidence?.length ? <MediaThumbs refs={initial.evidence.map((e) => e.ref)} /> : null}
+          <label className="block text-sm">
+            <span className="label">Notes, sketches (one per line, e.g. “note: alcove is not square”)</span>
             <textarea className="input min-h-24" value={evidence} onChange={(e) => setEvidence(e.target.value)} />
-            <span className="text-xs text-ink-soft">The pilot stores references only; send the files themselves by email when we request them.</span>
           </label>
           <label className="block text-sm">
             <span className="label">Who took these measurements?</span>

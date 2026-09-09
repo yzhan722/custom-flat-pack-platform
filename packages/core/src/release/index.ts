@@ -1,9 +1,10 @@
-import type { AssemblyGuide } from "../assembly";
+import type { AssemblyGuide, AssemblyStep } from "../assembly";
+import type { FactoryCapability } from "../catalog";
 import type { DesignSpec } from "../design";
 import { contentHash, sha256Hex } from "../ids";
 import type { HardwareBom } from "../hardware";
-import type { PackagingPlan } from "../packaging";
-import type { CompiledCabinet } from "../panels";
+import { planReplacementPackaging, type PackagingPlan } from "../packaging";
+import type { CompiledCabinet, Panel } from "../panels";
 import type { PriceBreakdown } from "../pricing";
 import type { EvaluationReport } from "../rules";
 import { umToMmRounded } from "../units";
@@ -79,6 +80,29 @@ export interface ProductionReleasePayload {
   labels: PanelLabel[];
   documents: string[];
   ruleReport: EvaluationReport;
+  /** Omitted on packages built before replacement jobs existed; treat as production. */
+  kind?: ReleaseKind;
+  replacement?: ReplacementRecord;
+}
+
+export type ReleaseKind = "production" | "replacement";
+
+export type ReplacementPartKind = "panel" | "hardware_bag";
+
+/** Provenance for a FR-12 replacement job. Copied fields are from the source package, never from a later catalog compile. */
+export interface ReplacementRecord {
+  sourceReleaseKey: string;
+  serviceCaseId: string;
+  partKind: ReplacementPartKind;
+  partRef: string;
+  copiedFrom: {
+    engineeringHash: string;
+    designVersion: number;
+    templateId: string;
+    templateVersion: number;
+    constructionId: string;
+    constructionVersion: number;
+  };
 }
 
 export interface ProductionRelease {
@@ -153,6 +177,168 @@ export function buildProductionRelease(input: ProductionReleaseInput): Productio
     labels,
     documents,
     ruleReport: input.report,
+    kind: "production",
+  };
+  return { payload, contentHash: contentHash(payload) };
+}
+
+export interface ReplacementReleaseInput {
+  source: ProductionReleasePayload;
+  sequence: number;
+  serviceCaseId: string;
+  partKind: ReplacementPartKind;
+  partRef: string;
+  factory: FactoryCapability;
+  requestedAt: string;
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function replacementAssembly(source: ProductionReleasePayload, partKind: ReplacementPartKind, partRef: string, panelIds: string[]): AssemblyGuide {
+  const bagSkus = new Set(source.hardware.lines.filter((l) => l.bagCode === partRef).map((l) => l.sku));
+  const relevant = source.assembly.steps.filter((s) =>
+    partKind === "panel" ? s.panelIds.includes(partRef) : s.hardware.some((h) => bagSkus.has(h.sku)),
+  );
+  const notice: AssemblyStep = {
+    id: "REPL-S0",
+    order: 1,
+    title: "Replacement part — fit to the original cabinet",
+    titleZh: "补件：按原柜安装",
+    moduleIndex: relevant[0]?.moduleIndex ?? null,
+    panelIds,
+    hardware: [],
+    tools: source.assembly.tools,
+    instructions: [
+      `This package contains a replacement ${partKind === "panel" ? "panel" : "hardware bag"} copied from release ${source.releaseKey}.`,
+      "Do not recut or redrill. Hole positions, sizes and SKUs match the original production record — not the current catalog.",
+      "Fit it in place of the damaged or missing part using the original orientation.",
+    ],
+    checks: ["The replacement matches the original label, size and hole pattern.", "No extra holes have been added."],
+    safety: relevant.flatMap((s) => s.safety).slice(0, 4),
+    dependsOn: [],
+    orientation: relevant[0]?.orientation ?? "as original",
+    isSafetyCritical: relevant.some((s) => s.isSafetyCritical),
+  };
+  const rest = relevant.map((s, i) => ({
+    ...cloneJson(s),
+    order: i + 2,
+    dependsOn: i === 0 ? ["REPL-S0"] : cloneJson(s.dependsOn),
+  }));
+  return {
+    recipeId: source.assembly.recipeId,
+    recipeVersion: source.assembly.recipeVersion,
+    estimatedMinutes: Math.max(15, relevant.length * 10),
+    people: source.assembly.people,
+    workspaceNote: `Replacement from ${source.releaseKey}. Original assembly recipe ${source.assembly.recipeId} v${source.assembly.recipeVersion}.`,
+    tools: source.assembly.tools,
+    steps: [notice, ...rest],
+  };
+}
+
+/**
+ * FR-12 / PRD §7.2: a single-part production job cloned from an immutable
+ * release. Never recompiles the current template — that would overwrite the
+ * original structure if the catalog has moved on.
+ */
+export function buildReplacementRelease(input: ReplacementReleaseInput): ProductionRelease {
+  const source = input.source;
+  if (source.kind === "replacement") {
+    throw new Error("Replacement jobs must be copied from the original production package, not from another replacement.");
+  }
+  const replacement: ReplacementRecord = {
+    sourceReleaseKey: source.releaseKey,
+    serviceCaseId: input.serviceCaseId,
+    partKind: input.partKind,
+    partRef: input.partRef,
+    copiedFrom: {
+      engineeringHash: source.engineeringHash,
+      designVersion: source.designVersion,
+      templateId: source.versions.templateId,
+      templateVersion: source.versions.templateVersion,
+      constructionId: source.versions.constructionId,
+      constructionVersion: source.versions.constructionVersion,
+    },
+  };
+
+  let panels: Panel[] = [];
+  let hardware: HardwareBom;
+  if (input.partKind === "panel") {
+    const panel = source.panels.find((p) => p.id === input.partRef);
+    if (!panel) throw new Error(`Panel ${input.partRef} is not in release ${source.releaseKey}.`);
+    panels = [cloneJson(panel)];
+    hardware = {
+      hardwareSystemId: source.hardware.hardwareSystemId,
+      hardwareSystemVersion: source.hardware.hardwareSystemVersion,
+      lines: [],
+      bags: [],
+    };
+  } else {
+    const bag = source.hardware.bags.find((b) => b.bagCode === input.partRef);
+    if (!bag) throw new Error(`Hardware bag ${input.partRef} is not in release ${source.releaseKey}.`);
+    hardware = {
+      hardwareSystemId: source.hardware.hardwareSystemId,
+      hardwareSystemVersion: source.hardware.hardwareSystemVersion,
+      lines: cloneJson(source.hardware.lines.filter((l) => l.bagCode === bag.bagCode)),
+      bags: [cloneJson(bag)],
+    };
+  }
+
+  const packaging = planReplacementPackaging({
+    kind: input.partKind,
+    panel: panels[0],
+    bagCode: input.partKind === "hardware_bag" ? input.partRef : undefined,
+    bom: input.partKind === "hardware_bag" ? hardware : source.hardware,
+    factory: input.factory,
+  });
+
+  const panelIds = panels.map((p) => p.id);
+  const joints = cloneJson(source.joints.filter((j) => (input.partKind === "panel" ? j.panelIds.includes(input.partRef) : j.hardware.some((h) => hardware.lines.some((l) => l.sku === h.sku)))));
+  const labels =
+    input.partKind === "panel"
+      ? panels.map((p) => ({
+          panelId: p.id,
+          label: p.label,
+          line1: `${p.label}  ${p.name}`,
+          line2: `${umToMmRounded(p.finished.length_um)} × ${umToMmRounded(p.finished.width_um)} × ${umToMmRounded(p.thickness_um)} mm  ${p.materialId}`,
+          line3: `REPLACEMENT of ${source.releaseKey}  v${source.designVersion}`,
+          qrPayload: `cfp:release/${releaseKeyFor(source.orderId, source.designVersion, source.engineeringHash, input.sequence)}/panel/${p.id}`,
+        }))
+      : [];
+
+  const releaseKey = releaseKeyFor(source.orderId, source.designVersion, source.engineeringHash, input.sequence);
+  if (labels[0]) labels[0].qrPayload = `cfp:release/${releaseKey}/panel/${labels[0].panelId}`;
+
+  const payload: ProductionReleasePayload = {
+    releaseKey,
+    orderId: source.orderId,
+    designVersion: source.designVersion,
+    sequence: input.sequence,
+    engineeringHash: source.engineeringHash,
+    versions: cloneJson(source.versions),
+    design: cloneJson(source.design),
+    summary: {
+      ...cloneJson(source.summary),
+      panelCount: panels.length,
+      weight_kg: panels[0]?.weight_kg ?? packaging.totalWeight_kg,
+      flags: [...source.summary.flags, "REPLACEMENT"],
+    },
+    approval: cloneJson(source.approval),
+    confirmation: cloneJson(source.confirmation),
+    quote: cloneJson(source.quote),
+    panels,
+    joints,
+    modules: cloneJson(source.modules),
+    dims: cloneJson(source.dims),
+    hardware,
+    packaging,
+    assembly: replacementAssembly(source, input.partKind, input.partRef, panelIds),
+    labels,
+    documents: input.partKind === "panel" ? ["REPLACEMENT_CUTLIST", "PACKING_LIST"] : ["HARDWARE_LIST", "PACKING_LIST"],
+    ruleReport: cloneJson(source.ruleReport),
+    kind: "replacement",
+    replacement,
   };
   return { payload, contentHash: contentHash(payload) };
 }

@@ -21,6 +21,7 @@ export function ActionForm({
   submitClassName = "btn-primary",
   confirmText,
   hideSubmit = false,
+  encType,
 }: {
   action: ServerAction;
   children?: React.ReactNode;
@@ -29,12 +30,14 @@ export function ActionForm({
   submitClassName?: string;
   confirmText?: string;
   hideSubmit?: boolean;
+  encType?: string;
 }) {
   const [state, formAction] = useActionState(action, INITIAL);
   return (
     <form
       action={formAction}
       className={className}
+      encType={encType}
       onSubmit={(e) => {
         if (confirmText && !window.confirm(confirmText)) e.preventDefault();
       }}

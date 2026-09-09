@@ -67,6 +67,46 @@ function finalise(pkg: PackageSpec, factory: FactoryCapability): PackageSpec {
   return { ...pkg, volume_m3: round4(volume), exceedsParcelLimits: exceedsParcel, exceedsLocalLimits: exceedsLocal };
 }
 
+/** One package for a replacement panel or hardware bag copied from an old release. */
+export function planReplacementPackaging(input: {
+  kind: "panel" | "hardware_bag";
+  panel?: Panel;
+  bagCode?: string;
+  bom: HardwareBom;
+  factory: FactoryCapability;
+}): PackagingPlan {
+  let pkg: PackageSpec;
+  if (input.kind === "panel") {
+    if (!input.panel) throw new Error("Replacement packaging for a panel requires the panel.");
+    pkg = packPanels("P01", `Replacement ${input.panel.label} ${input.panel.name}`, input.panel.moduleIndex, [input.panel], input.factory, "REPL-S0");
+  } else {
+    const bag = input.bom.bags.find((b) => b.bagCode === input.bagCode);
+    if (!bag) throw new Error(`Hardware bag ${input.bagCode} is not in this BOM.`);
+    pkg = finalise(
+      {
+        code: "P01",
+        title: `Replacement hardware bag ${bag.bagCode}`,
+        moduleIndex: null,
+        contents: [{ kind: "hardware_bag", ref: bag.bagCode, label: `Bag ${bag.bagCode}: ${bag.skus.join(", ")}` }],
+        outer: { length_um: mmToUm(300), width_um: mmToUm(220), height_um: mmToUm(80) },
+        weight_kg: round2(HARDWARE_BAG_WEIGHT_KG + 0.2),
+        volume_m3: 0,
+        exceedsParcelLimits: false,
+        exceedsLocalLimits: false,
+        neededFromStep: "REPL-S0",
+      },
+      input.factory,
+    );
+  }
+  return {
+    packages: [pkg],
+    totalWeight_kg: pkg.weight_kg,
+    largestLength_um: pkg.outer.length_um,
+    anyExceedsParcel: pkg.exceedsParcelLimits,
+    anyExceedsLocal: pkg.exceedsLocalLimits,
+  };
+}
+
 /**
  * Groups panels into packages ordered by assembly sequence: carcass first,
  * then shelves/doors, then the spanning top, then hardware and documents.

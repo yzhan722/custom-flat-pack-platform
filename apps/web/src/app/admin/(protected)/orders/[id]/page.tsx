@@ -7,9 +7,10 @@ import { ElevationDrawing } from "@/components/ElevationDrawing";
 import { PriceBreakdown } from "@/components/PriceBreakdown";
 import { RuleReport } from "@/components/RuleReport";
 import { dateOnly, dateTime, mm, money, titleCase } from "@/lib/format";
-import { addCost, copyQuoteEstimateCosts, inspectPanel, issueQuote, packPackage, recordPayment, recordReview, runProductionStep, updateServiceCase } from "@/server/actions/admin";
+import { addCost, copyQuoteEstimateCosts, createReplacementRelease, inspectPanel, issueQuote, packPackage, recordPayment, recordReview, runProductionStep, updateServiceCase } from "@/server/actions/admin";
 import { contribution, inspectionState, openBlocks, releaseGateFor, shipmentBlockers } from "@/server/production";
 import { getOrder, loadOrderBundle } from "@/server/queries";
+import { MediaThumbs } from "@/components/MediaThumbs";
 
 export const dynamic = "force-dynamic";
 
@@ -193,10 +194,10 @@ export default async function AdminOrderPage({ params }: { params: Promise<{ id:
                 {b.releases.map((r) => (
                   <li key={r.releaseKey} className="rounded-md border border-line p-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="font-mono text-xs">{r.releaseKey} · seq {r.sequence} · v{r.designVersion} · content {r.contentHash.slice(0, 12)}</span>
+                      <span className="font-mono text-xs">{r.releaseKey} · {r.kind} · seq {r.sequence} · v{r.designVersion} · content {r.contentHash.slice(0, 12)}</span>
                       <Pill tone={r.status === "active" ? "good" : r.status === "stopped" ? "bad" : "neutral"}>{r.status}</Pill>
                     </div>
-                    <p className="text-xs text-ink-soft">{r.releasedBy} · {dateTime(r.releasedAt)} · {r.payload.panels.length} panels · {r.payload.hardware.lines.length} hardware SKUs · {r.payload.packaging.packages.length} packages · documents {r.payload.documents.join(", ")}{r.stoppedReason ? ` · stopped: ${r.stoppedReason}` : ""}</p>
+                    <p className="text-xs text-ink-soft">{r.releasedBy} · {dateTime(r.releasedAt)} · {r.payload.panels.length} panels · {r.payload.hardware.lines.length} hardware SKUs · {r.payload.packaging.packages.length} packages · documents {r.payload.documents.join(", ")}{r.kind === "replacement" && r.payload.replacement ? ` · from ${r.payload.replacement.sourceReleaseKey} · case ${r.payload.replacement.serviceCaseId} · ${r.payload.replacement.partRef}` : ""}{r.stoppedReason ? ` · stopped: ${r.stoppedReason}` : ""}</p>
                     <div className="mt-2 flex flex-wrap gap-2 text-xs">
                       <a className="btn-secondary btn-sm" href={`/admin/orders/${order.id}/release/${r.releaseKey}/cutlist.csv`}>Cut list CSV</a>
                       <a className="btn-secondary btn-sm" href={`/admin/orders/${order.id}/release/${r.releaseKey}/operations.csv`}>Operations CSV</a>
@@ -205,7 +206,7 @@ export default async function AdminOrderPage({ params }: { params: Promise<{ id:
                       <Link className="btn-secondary btn-sm" href={`/admin/orders/${order.id}/release/${r.releaseKey}/packing`}>Packing list</Link>
                       <Link className="btn-secondary btn-sm" href={`/guide/${r.releaseKey}`}>Public guide (QR)</Link>
                       <Link className="btn-secondary btn-sm" href={`/orders/${order.id}/assembly?t=${order.accessToken}`}>Assembly guide</Link>
-                      {r.status === "active" && <StepForm orderId={order.id} intent="stop_release" label="Stop release" cls="btn-danger btn-sm" withText placeholder="Reason" confirm="Stop this release? Production must halt." />}
+                      {r.status === "active" && r.kind !== "replacement" && <StepForm orderId={order.id} intent="stop_release" label="Stop release" cls="btn-danger btn-sm" withText placeholder="Reason" confirm="Stop this release? Production must halt." />}
                     </div>
                   </li>
                 ))}
@@ -222,7 +223,7 @@ export default async function AdminOrderPage({ params }: { params: Promise<{ id:
                 {order.status === "in_production" && <StepForm orderId={order.id} intent="start_qc" label="Start QC and packing" cls="btn-primary btn-sm" />}
                 {order.status === "qc_packing" && <StepForm orderId={order.id} intent="ship" label="Dispatch" cls="btn-primary btn-sm" disabled={shipBlockers.length > 0} withText placeholder="Carrier / driver" />}
                 {order.status === "shipped" && <StepForm orderId={order.id} intent="delivered" label="Mark delivered" cls="btn-primary btn-sm" />}
-                {order.status === "delivered" && <StepForm orderId={order.id} intent="complete" label="Complete (assembly feedback received)" cls="btn-primary btn-sm" />}
+                {(order.status === "delivered" || order.status === "aftersales") && <StepForm orderId={order.id} intent="complete" label="Complete (assembly feedback received)" cls="btn-primary btn-sm" />}
                 <StepForm orderId={order.id} intent="open_block" label="Open block" cls="btn-danger btn-sm" withText placeholder="What is wrong" />
               </div>
               {blocks.length > 0 && (
@@ -312,7 +313,82 @@ export default async function AdminOrderPage({ params }: { params: Promise<{ id:
                       <span className="text-xs text-ink-soft">opened {dateTime(c.createdAt)} · release {c.releaseKey ?? "—"} · <Pill tone={c.status === "resolved" || c.status === "closed" ? "good" : c.status === "responded" ? "info" : "warn"}>{c.status}</Pill></span>
                     </div>
                     <p className="mt-1">{c.symptom}</p>
-                    {c.photoRefs.length > 0 && <p className="text-xs text-ink-soft">Photos: {c.photoRefs.join(", ")}</p>}
+                    <MediaThumbs refs={c.photoRefs} />
+                    {(c.partKind === "panel" || c.partKind === "hardware_bag") && (
+                      <ActionForm action={createReplacementRelease} submitLabel="Issue replacement from original release" submitClassName="btn-secondary btn-sm" className="mt-2" confirmText="This copies the part from the original production package. It will not recompile the current template.">
+                        <input type="hidden" name="orderId" value={order.id} />
+                        <input type="hidden" name="caseId" value={c.id} />
+                      </ActionForm>
+                    )}
+                    {b.releases.filter((r) => r.kind === "replacement" && r.serviceCaseId === c.id).map((repl) => {
+                      const inspect = inspectionState(b, repl.releaseKey);
+                      const blockers = shipmentBlockers(b, repl);
+                      return (
+                        <div key={repl.releaseKey} className="mt-3 rounded-md border border-line bg-stone-50 p-3">
+                          <p className="text-xs font-semibold">Replacement {repl.releaseKey} · {repl.payload.replacement?.partRef} · {repl.status}</p>
+                          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                            <a className="btn-secondary btn-sm" href={`/admin/orders/${order.id}/release/${repl.releaseKey}/cutlist.csv`}>Cut list CSV</a>
+                            <a className="btn-secondary btn-sm" href={`/admin/orders/${order.id}/release/${repl.releaseKey}/operations.csv`}>Operations CSV</a>
+                            <Link className="btn-secondary btn-sm" href={`/admin/orders/${order.id}/release/${repl.releaseKey}/labels`}>Labels</Link>
+                            <Link className="btn-secondary btn-sm" href={`/admin/orders/${order.id}/release/${repl.releaseKey}/packing`}>Packing list</Link>
+                          </div>
+                          {repl.payload.panels.length > 0 && (
+                            <table className="table mt-2 text-xs">
+                              <thead><tr><th>Label</th><th>Panel</th><th>Cut size</th><th>Result</th><th /></tr></thead>
+                              <tbody>
+                                {repl.payload.panels.map((p) => {
+                                  const r = inspect.latest.get(p.id);
+                                  return (
+                                    <tr key={p.id}>
+                                      <td className="font-mono font-semibold">{p.label}</td>
+                                      <td>{p.name}</td>
+                                      <td className="tabular-nums">{mm(p.cut.length_um)} × {mm(p.cut.width_um)}</td>
+                                      <td>{r ? <Pill tone={r.pass ? "good" : "bad"}>{r.pass ? "pass" : "fail"}</Pill> : <Pill>pending</Pill>}</td>
+                                      <td>
+                                        <ActionForm action={inspectPanel} hideSubmit className="flex items-center gap-1">
+                                          <input type="hidden" name="orderId" value={order.id} />
+                                          <input type="hidden" name="releaseKey" value={repl.releaseKey} />
+                                          <input type="hidden" name="panelId" value={p.id} />
+                                          <button name="result" value="pass" className="btn-secondary btn-sm" type="submit">Pass</button>
+                                          <button name="result" value="fail" className="btn-danger btn-sm" type="submit">Fail</button>
+                                        </ActionForm>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          )}
+                          <ul className="mt-2 space-y-2 text-xs">
+                            {repl.payload.packaging.packages.map((pkg) => {
+                              const done = inspect.packed.get(pkg.code);
+                              return (
+                                <li key={pkg.code} className="rounded-md border border-line bg-white p-2">
+                                  <div className="flex items-center justify-between">
+                                    <span><span className="font-mono font-semibold">{pkg.code}</span> {pkg.title} · plan {pkg.weight_kg} kg</span>
+                                    {done ? <Pill tone="good">packed {done.weight_kg} kg</Pill> : <Pill>pending</Pill>}
+                                  </div>
+                                  {!done && (
+                                    <ActionForm action={packPackage} hideSubmit className="mt-2 flex flex-wrap items-center gap-2">
+                                      <input type="hidden" name="orderId" value={order.id} />
+                                      <input type="hidden" name="releaseKey" value={repl.releaseKey} />
+                                      <input type="hidden" name="code" value={pkg.code} />
+                                      <input name="weight_kg" type="number" step="0.01" className="input w-24 py-1 text-xs" placeholder="kg" required />
+                                      <label className="flex items-center gap-1"><input type="checkbox" name="verified" /> contents verified</label>
+                                      <button type="submit" className="btn-secondary btn-sm">Packed</button>
+                                    </ActionForm>
+                                  )}
+                                </li>
+                              );
+                            })}
+                          </ul>
+                          {repl.status === "active" && (
+                            <StepForm orderId={order.id} intent="ship_replacement" label="Dispatch replacement" cls="btn-primary btn-sm" withText placeholder="Carrier / driver" releaseKey={repl.releaseKey} disabled={blockers.length > 0} />
+                          )}
+                          {blockers.length > 0 && <p className="mt-1 text-xs text-amber-800">{blockers.join(" ")}</p>}
+                        </div>
+                      );
+                    })}
                     <ActionForm action={updateServiceCase} submitLabel="Update case" submitClassName="btn-secondary btn-sm" className="mt-2 grid gap-2 md:grid-cols-4">
                       <input type="hidden" name="caseId" value={c.id} />
                       <input type="hidden" name="orderId" value={order.id} />
@@ -403,12 +479,13 @@ function summarise(payload: Record<string, unknown>): string {
     .join(" · ");
 }
 
-function StepForm({ orderId, intent, label, cls, withText = false, placeholder, disabled = false, confirm, blockId, block = false }: { orderId: string; intent: string; label: string; cls: string; withText?: boolean; placeholder?: string; disabled?: boolean; confirm?: string; blockId?: string; block?: boolean }) {
+function StepForm({ orderId, intent, label, cls, withText = false, placeholder, disabled = false, confirm, blockId, block = false, releaseKey }: { orderId: string; intent: string; label: string; cls: string; withText?: boolean; placeholder?: string; disabled?: boolean; confirm?: string; blockId?: string; block?: boolean; releaseKey?: string }) {
   return (
     <ActionForm action={runProductionStep} hideSubmit className={block ? "space-y-2" : "flex items-center gap-1"} confirmText={confirm}>
       <input type="hidden" name="orderId" value={orderId} />
       <input type="hidden" name="intent" value={intent} />
       {blockId && <input type="hidden" name="blockId" value={blockId} />}
+      {releaseKey && <input type="hidden" name="releaseKey" value={releaseKey} />}
       {withText && <input name="text" className={`input ${block ? "" : "w-40"} py-1 text-xs`} placeholder={placeholder} />}
       <button type="submit" className={cls} disabled={disabled}>{label}</button>
     </ActionForm>

@@ -11,13 +11,20 @@ import {
   saveMeasurement,
   startOrder,
   submitForReview,
+  uploadOrderMedia,
   type ActionState,
 } from "@/server/actions/customer";
-import { addCost, copyQuoteEstimateCosts, deleteServiceArea, inspectPanel, issueQuote, packPackage, recordPayment, recordReview, runProductionStep, seedDemoOrders, updateServiceCase, upsertServiceArea } from "@/server/actions/admin";
+import { addCost, copyQuoteEstimateCosts, createReplacementRelease, deleteServiceArea, inspectPanel, issueQuote, packPackage, recordPayment, recordReview, runProductionStep, seedDemoOrders, updateServiceCase, upsertServiceArea } from "@/server/actions/admin";
 import { contribution, quoteEstimateCosts, releaseGateFor, shipmentBlockers } from "@/server/production";
 import { getOrder, getRelease, listAllOrders, listPayments, listReleases, listServiceAreas, loadOrderBundle } from "@/server/queries";
+import { readMediaFile } from "@/server/media";
 
 const INIT: ActionState = { ok: false };
+
+/** 1×1 PNG used to exercise the photo-upload path. */
+const PNG_1X1 = Uint8Array.from(
+  Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQF/pYlY2wAAAABJRU5ErkJggg==", "base64"),
+);
 
 async function bundle(orderId: string) {
   const order = await getOrder(orderId);
@@ -246,7 +253,40 @@ describe("order lifecycle (PRD §4, §7)", () => {
     let b = await bundle(orderId);
     expect(b.order.status).toBe("aftersales");
     expect(b.cases[0]!.releaseKey).toBe(b.release!.releaseKey);
-    const upd = await updateServiceCase(INIT, form({ caseId: b.cases[0]!.id, orderId, status: "resolved", cause: "packaging_transport", responsibility: "platform", resolution: "Re-cut from release", cost: "38.5" }));
+
+    const missing = await createReplacementRelease(INIT, form({ orderId, caseId: b.cases[0]!.id, partRef: "M9-NOPE" }));
+    expect(missing.ok).toBe(false);
+    expect(missing.error).toMatch(/not in release/);
+
+    const created = await createReplacementRelease(INIT, form({ orderId, caseId: b.cases[0]!.id }));
+    expect(created.ok).toBe(true);
+    b = await bundle(orderId);
+    expect(b.release!.kind).not.toBe("replacement");
+    const original = b.releases.find((r) => r.kind !== "replacement")!;
+    const repl = b.releases.find((r) => r.kind === "replacement");
+    expect(repl).toBeDefined();
+    expect(repl!.payload.kind).toBe("replacement");
+    expect(repl!.payload.panels).toHaveLength(1);
+    expect(repl!.payload.panels[0]).toEqual(original.payload.panels.find((p) => p.id === "M1-DOOR-L"));
+    expect(repl!.payload.design.finished).toEqual(original.payload.design.finished);
+    expect(repl!.payload.replacement?.sourceReleaseKey).toBe(original.releaseKey);
+    expect(repl!.payload.replacement?.serviceCaseId).toBe(b.cases[0]!.id);
+    expect(repl!.serviceCaseId).toBe(b.cases[0]!.id);
+    expect(b.release!.releaseKey).toBe(original.releaseKey);
+
+    expect((await inspectPanel(INIT, form({ orderId, releaseKey: repl!.releaseKey, panelId: "M1-DOOR-L", result: "pass" }))).ok).toBe(true);
+    const pkg = repl!.payload.packaging.packages[0]!;
+    expect((await packPackage(INIT, form({ orderId, releaseKey: repl!.releaseKey, code: pkg.code, weight_kg: String(pkg.weight_kg), verified: "on" }))).ok).toBe(true);
+    expect(shipmentBlockers(b, repl).length).toBeGreaterThan(0);
+    b = await bundle(orderId);
+    expect(shipmentBlockers(b, repl).join(" ")).not.toMatch(/not inspected|not packed/);
+    const shipped = await runProductionStep(INIT, form({ orderId, intent: "ship_replacement", text: "courier", releaseKey: repl!.releaseKey }));
+    expect(shipped.ok).toBe(true);
+    b = await bundle(orderId);
+    expect(b.order.status).toBe("aftersales");
+    expect(b.release!.releaseKey).toBe(original.releaseKey);
+
+    const upd = await updateServiceCase(INIT, form({ caseId: b.cases[0]!.id, orderId, status: "resolved", cause: "packaging_transport", responsibility: "platform", resolution: `Re-cut from ${original.releaseKey} as ${repl!.releaseKey}`, cost: "38.5" }));
     expect(upd.ok).toBe(true);
     b = await bundle(orderId);
     expect(b.cases[0]!.status).toBe("resolved");
@@ -269,6 +309,30 @@ describe("order lifecycle (PRD §4, §7)", () => {
     expect(c.cm1).toBe(c.revenueEx - 21_000 - 15_500 - 3850);
     expect(c.missingCategories).toContain("hardware");
     expect(c.missingCategories).not.toContain("board");
+  });
+
+  it("FR-12 photos are stored as files and a safety case pauses new production", async () => {
+    const fd = form({
+      orderId,
+      partRef: "M1-SIDE_L",
+      partKind: "panel",
+      severity: "safety",
+      symptom: "Crack along the left side near the hinge plate after assembly.",
+    });
+    fd.append("photos", new File([PNG_1X1], "crack.png", { type: "image/png" }));
+    const opened = await openServiceCase(INIT, fd);
+    expect(opened.ok).toBe(true);
+    const b = await bundle(orderId);
+    expect(b.order.status).toBe("aftersales");
+    const safety = b.cases.find((c) => c.severity === "safety")!;
+    expect(safety.photoRefs).toHaveLength(1);
+    expect(safety.photoRefs[0]).toMatch(/^\/api\/media\/med_/);
+    const mediaId = safety.photoRefs[0]!.split("/").pop()!;
+    const stored = await readMediaFile(mediaId);
+    expect(stored).not.toBeNull();
+    expect(stored!.mime).toBe("image/png");
+    expect(stored!.bytes[0]).toBe(0x89);
+    expect(b.events.some((e) => e.kind === "block_opened" && String(e.payload.reason).toLowerCase().includes("safety"))).toBe(true);
   });
 });
 
@@ -308,6 +372,18 @@ describe("change control (PRD §7.2)", () => {
     expect(await claimOrderAccess(id, order.accessToken)).toBe(true);
     const allowed = await saveMeasurement(id, { spaceConstrained: false, internalRequirements: [], obstacles: [], evidence: [] });
     expect(allowed.ok).toBe(true);
+    const photoFd = form({ orderId: id });
+    photoFd.append("photos", new File([PNG_1X1], "alcove.png", { type: "image/png" }));
+    const up = await uploadOrderMedia(photoFd);
+    expect(up.ok).toBe(true);
+    expect(up.refs?.[0]).toMatch(/^\/api\/media\/med_/);
+    const withPhoto = await saveMeasurement(id, {
+      spaceConstrained: false,
+      internalRequirements: [],
+      obstacles: [],
+      evidence: [{ kind: "photo", ref: up.refs![0]! }],
+    });
+    expect(withPhoto.ok).toBe(true);
   });
 
   it("demo seed walks four orders through the real workflow", async () => {

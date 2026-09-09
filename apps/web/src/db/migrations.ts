@@ -194,4 +194,24 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 `,
   },
+  {
+    id: "0001_replacement_and_media",
+    sql: `
+ALTER TABLE releases ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'production';
+ALTER TABLE releases ADD COLUMN IF NOT EXISTS source_release_key text;
+ALTER TABLE releases ADD COLUMN IF NOT EXISTS service_case_id text;
+CREATE TABLE IF NOT EXISTS media (
+  id text PRIMARY KEY,
+  order_id text NOT NULL,
+  kind text NOT NULL,
+  original_name text NOT NULL,
+  mime text NOT NULL,
+  size_bytes integer NOT NULL,
+  sha256 text NOT NULL,
+  created_by text NOT NULL,
+  created_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS media_order ON media (order_id);
+`,
+  },
 ];

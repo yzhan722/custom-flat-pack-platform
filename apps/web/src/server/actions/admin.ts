@@ -4,7 +4,7 @@ import { and, eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { addDays, buildProductionRelease, newId, type DesignSpec, type MeasurementSet } from "@cfp/core";
+import { addDays, buildProductionRelease, buildReplacementRelease, newId, type DesignSpec, type MeasurementSet } from "@cfp/core";
 import { getDb } from "@/db/client";
 import { costRecords, payments, quotes, releases, reviews, serviceAreas, serviceCases, type CostCategory, type Order } from "@/db/schema";
 import { requireAdmin, signInAdmin, signOutAdmin } from "@/lib/auth";
@@ -13,7 +13,7 @@ import { evaluateDesign } from "@/lib/engineering";
 import { nowIso } from "@/lib/format";
 import { appendDesignVersion, confirmCurrentVersion, createDraftOrder, logEvent, recomputePaymentStatus, requiredAcknowledgements, transition, updateOrder } from "../orders";
 import { releaseGateFor, shipmentBlockers, quoteEstimateCosts } from "../production";
-import { currentDesignVersion, getOrder, loadOrderBundle } from "../queries";
+import { currentDesignVersion, getOrder, getRelease, loadOrderBundle } from "../queries";
 import type { ActionState } from "./customer";
 
 export async function adminLogin(_prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -198,15 +198,16 @@ export async function recordPayment(_prev: ActionState, formData: FormData): Pro
 
 const StepSchema = z.object({
   orderId: z.string().min(1),
-  intent: z.enum(["materials_confirmed", "capacity_confirmed", "release", "start_production", "start_qc", "ship", "delivered", "complete", "open_block", "close_block", "note", "stop_release"]),
+  intent: z.enum(["materials_confirmed", "capacity_confirmed", "release", "start_production", "start_qc", "ship", "delivered", "complete", "open_block", "close_block", "note", "stop_release", "ship_replacement"]),
   text: z.string().trim().max(2000).optional(),
   blockId: z.string().optional(),
+  releaseKey: z.string().optional(),
 });
 
 export async function runProductionStep(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const parsed = StepSchema.safeParse(Object.fromEntries(formData.entries()));
   if (!parsed.success) return fail("Invalid production step.");
-  const { orderId, intent, text, blockId } = parsed.data;
+  const { orderId, intent, text, blockId, releaseKey: stepReleaseKey } = parsed.data;
   const { actor, order } = await staffOrder(orderId);
   const bundle = await loadOrderBundle(order);
   const releaseKey = bundle.release?.releaseKey ?? null;
@@ -247,7 +248,7 @@ export async function runProductionStep(_prev: ActionState, formData: FormData):
         sequence,
       });
       const db = await getDb();
-      await db.update(releases).set({ status: "superseded" }).where(and(eq(releases.orderId, orderId), eq(releases.status, "active")));
+      await db.update(releases).set({ status: "superseded" }).where(and(eq(releases.orderId, orderId), eq(releases.status, "active"), eq(releases.kind, "production")));
       // Same key -> same release: a retried request never creates a second executable task (FR-08).
       await db
         .insert(releases)
@@ -259,6 +260,7 @@ export async function runProductionStep(_prev: ActionState, formData: FormData):
           payload: rel.payload,
           contentHash: rel.contentHash,
           status: "active",
+          kind: "production",
           releasedBy: actor,
           releasedAt: nowIso(),
         })
@@ -283,6 +285,17 @@ export async function runProductionStep(_prev: ActionState, formData: FormData):
       if (missing.length) return { ok: false, error: "Cannot ship: dispatch checks incomplete.", reasons: missing };
       await transition(order, "shipped");
       await logEvent(orderId, releaseKey, "shipped", { carrier: text ?? "local delivery" }, actor);
+      break;
+    }
+    case "ship_replacement": {
+      const key = stepReleaseKey;
+      if (!key) return fail("Replacement release key missing.");
+      const repl = bundle.releases.find((r) => r.releaseKey === key);
+      if (!repl || repl.kind !== "replacement") return fail("Not a replacement release.");
+      if (repl.status !== "active") return fail("That replacement is not active.");
+      const missing = shipmentBlockers(bundle, repl);
+      if (missing.length) return { ok: false, error: "Cannot ship replacement: checks incomplete.", reasons: missing };
+      await logEvent(orderId, key, "shipped", { carrier: text ?? "local delivery", kind: "replacement" }, actor);
       break;
     }
     case "delivered": {
@@ -335,9 +348,10 @@ export async function inspectPanel(_prev: ActionState, formData: FormData): Prom
   if (!parsed.success) return fail("Invalid inspection.");
   const i = parsed.data;
   const { actor, order } = await staffOrder(i.orderId);
-  const bundle = await loadOrderBundle(order);
-  if (bundle.release?.releaseKey !== i.releaseKey) return fail("Inspection must reference the active release; this release is not active (wrong-version parts are rejected).");
-  if (!bundle.release.payload.panels.some((p) => p.id === i.panelId)) return fail(`Panel ${i.panelId} is not part of release ${i.releaseKey}.`);
+  const release = await getRelease(i.releaseKey);
+  if (!release || release.orderId !== order.id) return fail("Inspection must reference an active release; this release is not active (wrong-version parts are rejected).");
+  if (release.status !== "active") return fail("Inspection must reference an active release; this release is not active (wrong-version parts are rejected).");
+  if (!release.payload.panels.some((p) => p.id === i.panelId)) return fail(`Panel ${i.panelId} is not part of release ${i.releaseKey}.`);
   await logEvent(i.orderId, i.releaseKey, "panel_inspected", { panelId: i.panelId, pass: i.result === "pass", notes: i.notes ?? "" }, actor);
   refresh(i.orderId);
   return { ok: true };
@@ -356,9 +370,9 @@ export async function packPackage(_prev: ActionState, formData: FormData): Promi
   if (!parsed.success) return fail("Weigh the package and tick the contents check.");
   const i = parsed.data;
   const { actor, order } = await staffOrder(i.orderId);
-  const bundle = await loadOrderBundle(order);
-  if (bundle.release?.releaseKey !== i.releaseKey) return fail("Package must reference the active release.");
-  const pkg = bundle.release.payload.packaging.packages.find((p) => p.code === i.code);
+  const release = await getRelease(i.releaseKey);
+  if (!release || release.orderId !== order.id || release.status !== "active") return fail("Package must reference an active release.");
+  const pkg = release.payload.packaging.packages.find((p) => p.code === i.code);
   if (!pkg) return fail(`Package ${i.code} is not in this release.`);
   if (i.verified !== "on") return fail("Contents must be verified against the packing list before the package counts as packed.");
   const deviation = Math.abs(i.weight_kg - pkg.weight_kg);
@@ -402,6 +416,65 @@ export async function updateServiceCase(_prev: ActionState, formData: FormData):
     .where(eq(serviceCases.id, i.caseId));
   refresh(i.orderId);
   return { ok: true, message: "Case updated." };
+}
+
+const ReplacementSchema = z.object({
+  orderId: z.string().min(1),
+  caseId: z.string().min(1),
+  partRef: z.string().trim().max(40).optional(),
+});
+
+/** FR-12 / PRD §7.2: issue a single-part job copied from the original release package. */
+export async function createReplacementRelease(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const parsed = ReplacementSchema.safeParse(Object.fromEntries(formData.entries()));
+  if (!parsed.success) return fail("Case and order are required.");
+  const i = parsed.data;
+  const { actor, order } = await staffOrder(i.orderId);
+  const bundle = await loadOrderBundle(order);
+  const cse = bundle.cases.find((c) => c.id === i.caseId);
+  if (!cse) return fail("Case not found.");
+  if (cse.partKind !== "panel" && cse.partKind !== "hardware_bag") {
+    return fail("Only panels and hardware bags can be manufactured as replacements. Handle documents another way.");
+  }
+  const partRef = i.partRef || cse.partRef;
+  const source =
+    bundle.releases.find((r) => r.releaseKey === cse.releaseKey && r.kind !== "replacement") ??
+    bundle.release;
+  if (!source) return fail("No original production release to copy from.");
+  const existing = bundle.releases.find((r) => r.kind === "replacement" && r.serviceCaseId === cse.id && r.status === "active" && !i.partRef);
+  if (existing) return { ok: true, message: `Replacement ${existing.releaseKey} already exists.` };
+  let rel;
+  try {
+    rel = buildReplacementRelease({
+      source: source.payload,
+      sequence: bundle.releases.length + 1,
+      serviceCaseId: cse.id,
+      partKind: cse.partKind,
+      partRef,
+      factory: catalog.getFactory(order.factoryId),
+      requestedAt: nowIso(),
+    });
+  } catch (err) {
+    return fail((err as Error).message);
+  }
+  const db = await getDb();
+  await db.insert(releases).values({
+    releaseKey: rel.payload.releaseKey,
+    orderId: order.id,
+    designVersion: source.designVersion,
+    sequence: rel.payload.sequence,
+    payload: rel.payload,
+    contentHash: rel.contentHash,
+    status: "active",
+    kind: "replacement",
+    sourceReleaseKey: source.releaseKey,
+    serviceCaseId: cse.id,
+    releasedBy: actor,
+    releasedAt: nowIso(),
+  });
+  await logEvent(order.id, rel.payload.releaseKey, "note", { note: `Replacement ${rel.payload.releaseKey} copied from ${source.releaseKey} for ${partRef} (case ${cse.id}).` }, actor);
+  refresh(order.id);
+  return { ok: true, message: `Replacement ${rel.payload.releaseKey} issued from ${source.releaseKey}.` };
 }
 
 const CostSchema = z.object({

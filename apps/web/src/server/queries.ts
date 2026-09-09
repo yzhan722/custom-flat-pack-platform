@@ -138,9 +138,13 @@ export async function listReleases(orderId: string): Promise<Release[]> {
   return db.select().from(releases).where(eq(releases.orderId, orderId)).orderBy(desc(releases.sequence));
 }
 
+export function isProductionRelease(release: Release): boolean {
+  return release.kind !== "replacement";
+}
+
 export async function activeRelease(orderId: string): Promise<Release | null> {
   const list = await listReleases(orderId);
-  return list.find((r) => r.status === "active") ?? null;
+  return list.find((r) => r.status === "active" && isProductionRelease(r)) ?? null;
 }
 
 export async function getRelease(releaseKey: string): Promise<Release | null> {
@@ -199,7 +203,7 @@ export async function loadOrderBundle(order: Order) {
     payments: paymentList,
     totals: paymentTotals(paymentList),
     releases: releaseList,
-    release: releaseList.find((r) => r.status === "active") ?? null,
+    release: releaseList.find((r) => r.status === "active" && r.kind !== "replacement") ?? null,
     events,
     cases,
     costs,

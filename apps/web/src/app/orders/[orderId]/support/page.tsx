@@ -23,7 +23,7 @@ export default async function SupportPage({ params, searchParams }: { params: Pr
       <h1 className="text-2xl font-semibold tracking-tight">Report a problem or ask for a part</h1>
       <p className="mt-1 max-w-prose text-sm text-ink-soft">Pick the part by its label. We reproduce it from the production record of your order — no need to explain the whole design. First reply within one working day; a plan or request for details within two.</p>
       <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <ActionForm action={openServiceCase} submitLabel="Open case" className="card space-y-3 text-sm">
+        <ActionForm action={openServiceCase} submitLabel="Open case" className="card space-y-3 text-sm" encType="multipart/form-data">
           <input type="hidden" name="orderId" value={order.id} />
           <div className="grid gap-3 md:grid-cols-2">
             <label>
@@ -65,8 +65,13 @@ export default async function SupportPage({ params, searchParams }: { params: Pr
             <textarea name="symptom" className="input min-h-28" placeholder="e.g. A07 arrived with a chipped front edge; the hole for the hinge plate at the top does not line up…" required />
           </label>
           <label>
-            <span className="label">Photo references (optional, one per line)</span>
-            <textarea name="photoRefs" className="input min-h-16" placeholder="IMG_1023.jpg" />
+            <span className="label">Photos (optional)</span>
+            <input type="file" name="photos" accept="image/jpeg,image/png,image/webp,image/gif" multiple className="input" />
+            <span className="text-xs text-ink-soft">JPEG, PNG, WebP or GIF, up to 8 files. These stay on this order; they are not used as production measurements.</span>
+          </label>
+          <label>
+            <span className="label">Other references (optional, one per line)</span>
+            <textarea name="photoRefs" className="input min-h-16" placeholder="Tracking number, extra note…" />
           </label>
         </ActionForm>
         <aside className="card text-sm">
